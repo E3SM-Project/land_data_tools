@@ -400,5 +400,106 @@ def regrid_to_landgen_grid(data_2d, src_lat, src_lon, cell_ids, ll_limits,
             Path(str(tmp_mesh_in).replace('.geojson', '_fixed.geojson')).unlink(missing_ok=True)
         except Exception:
             pass
+        # remove the tmp_dir if it is now empty
+        try:
+            tmp_dir.rmdir()
+        except Exception:
+            pass  # not empty or already gone - that's fine
+
+#--------------------------------------------------------------------------
+
+def calc_ll_limits(size_degrees):
+    """Return a list of (min_lat, max_lat, min_lon, max_lon) tuples covering the globe
+    in size_degrees x size_degrees boxes.  Latitude: -90..90, Longitude: -180..180."""
+    if 90 % size_degrees != 0 or 180 % size_degrees != 0:
+        raise ValueError(
+            f"size_degrees ({size_degrees}) must evenly divide both 90 and 180"
+        )
+    ll_limits = []
+    lat = -90
+    while lat < 90:
+        lon = -180
+        while lon < 180:
+            ll_limits.append((lat, lat + size_degrees, lon, lon + size_degrees))
+            lon += size_degrees
+        lat += size_degrees
+    return ll_limits
+
+#--------------------------------------------------------------------------
+
+def write_lt_year_data_to_netcdf(lt_year_data, cell_ids, year, out_path, out_fname,
+                                  harvest_var_names, grazing_category_names):
+    """Write one year of LtData harvest/grazing arrays to a NetCDF file.
+
+    The output file is named  <out_path>/<stem>_<year>.<ext>
+    e.g. landgen_land_type.nc -> landgen_land_type_2015.nc
+
+    If the file already exists (from a previous run) it is overwritten.
+
+    Parameters
+    ----------
+    lt_year_data    : LtData proxy  – source of harvest_frac / grazing_frac
+    cell_ids        : 1-D array of HEALPix cell IDs (length n_cells)
+    year            : int
+    out_path        : str or Path – base output directory
+    out_fname       : str – template filename, e.g. 'landgen_land_type.nc'
+    harvest_var_names    : list of str – e.g. LUH2_HARVEST_VARS (length n_harvest)
+    grazing_category_names : list of str – e.g. ['pasture','rangeland'] (length n_grazing)
+    """
+    stem, suffix = out_fname.rsplit('.', 1)
+    year_fname = f"{stem}_{year}.{suffix}"
+    out_file = Path(out_path) / year_fname
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # retrieve arrays from the manager proxy
+    harvest_frac = lt_year_data.get_harvest_frac()   # shape (n_cells, n_harvest)
+    grazing_frac = lt_year_data.get_grazing_frac()   # shape (n_cells, n_grazing)
+
+    n_cells = len(cell_ids)
+
+    ds = xr.Dataset(
+        coords={
+            'cell':    ('cell',    np.arange(n_cells)),
+            'harvest': ('harvest', harvest_var_names),
+            'grazing': ('grazing', grazing_category_names),
+        }
+    )
+    # cell_id is a coordinate variable on the cell dimension, not a dimension itself
+    ds.coords['cell_id'] = xr.DataArray(cell_ids, dims='cell',
+                                         attrs={'long_name': 'HEALPix cell ID'})
+    ds.coords['cell'].attrs['long_name']    = 'HEALPix cell index'
+    ds.coords['harvest'].attrs['long_name'] = 'LUH2 harvest variable'
+    ds.coords['grazing'].attrs['long_name'] = 'HYDE grazing category'
+
+    ds['harvest_frac'] = xr.DataArray(
+        harvest_frac,
+        dims=('cell', 'harvest'),
+        attrs={
+            'long_name': 'fractional area harvested',
+            'units':     'fraction',
+        }
+    )
+
+    ds['grazing_frac'] = xr.DataArray(
+        grazing_frac,
+        dims=('cell', 'grazing'),
+        attrs={
+            'long_name': 'fractional area grazed',
+            'units':     'fraction',
+        }
+    )
+
+    ds.attrs['year']        = year
+    ds.attrs['description'] = 'landgen land type output — harvest and grazing fractions'
+
+    # use zlib compression to keep file sizes manageable
+    encoding = {
+        'harvest_frac': {'zlib': True, 'complevel': 4, 'dtype': 'float32'},
+        'grazing_frac': {'zlib': True, 'complevel': 4, 'dtype': 'float32'},
+    }
+
+    ds.to_netcdf(out_file, encoding=encoding)
+    print(f"  Written: {out_file}")
+    return out_file
 
 #--------------------------------------------------------------------------

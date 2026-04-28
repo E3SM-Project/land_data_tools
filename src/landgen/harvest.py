@@ -11,7 +11,10 @@ from . import shared_data
 from . import landgen_io
 # import normalize_cell # not created yet
 import pandas as pd
+import numpy as np
 import os
+import traceback
+import time
 
 ########## define helper functions for harvest run() here
 
@@ -26,11 +29,64 @@ import os
 
 ## output
 
-def harvest_process(lt_year_data, year, harvest_path, harvest_name, grazing_path, grazing_names,
-                    com_config_dict, out_grid_data, ll_limits, cell_ids,
-                    global_mesh_df, man_lock, grid_lock, lt_lock):
+## module-level globals set once per worker process via pool initializer.
+## Using fork + initializer means these large arrays are copy-on-write shared
+## across all workers — no re-import overhead, no per-task pickling of large data.
+## IMPORTANT: no manager proxy objects here — those cause deadlocks when forked.
+_g_global_mesh_df  = None
+_g_cellid_to_idx   = None
+_g_com_config_dict = None
+_g_harvest_data    = None
+_g_grazing_data    = None
+_g_grazing_names   = None
 
-    print(f"Processing harvest and grazing module year {year} with parameters:")
+def _worker_init(global_mesh_df, cellid_to_idx, com_config_dict,
+                 harvest_data, grazing_data, grazing_names):
+    """Pool initializer: store read-only data as process-local globals.
+    Called once per worker at pool startup (not once per task).
+    All objects are plain Python/numpy — no manager proxies.
+    """
+    global _g_global_mesh_df, _g_cellid_to_idx, _g_com_config_dict
+    global _g_harvest_data, _g_grazing_data, _g_grazing_names
+    _g_global_mesh_df  = global_mesh_df
+    _g_cellid_to_idx   = cellid_to_idx
+    _g_com_config_dict = com_config_dict
+    _g_harvest_data    = harvest_data
+    _g_grazing_data    = grazing_data
+    _g_grazing_names   = grazing_names
+
+def _harvest_process_star(args):
+    """Unpack tuple args for pool.imap_unordered (lambdas can't be pickled)."""
+    t0 = time.time()
+    result = harvest_process(*args)
+    elapsed = time.time() - t0
+    year, ll_limits, _ = args
+    print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
+    return result
+
+def harvest_process(year, ll_limits, cell_ids):
+    """Compute regridded harvest/grazing for one spatial chunk.
+    Data comes from worker globals (set once via initializer, not per task).
+    Returns (row_indices, harvest_results, grazing_results) — no proxy access.
+    """
+    try:
+        return _harvest_process_impl(
+            year, _g_grazing_names,
+            _g_com_config_dict, ll_limits, cell_ids,
+            _g_global_mesh_df, _g_cellid_to_idx,
+            _g_harvest_data, _g_grazing_data,
+        )
+    except Exception:
+        print(f"ERROR in harvest_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
+        raise
+
+def _harvest_process_impl(year, grazing_names,
+                    com_config_dict, ll_limits, cell_ids,
+                    global_mesh_df, cellid_to_idx,
+                    harvest_data, grazing_data):
+    """Pure-compute worker: reads source data, regrids, and returns arrays.
+    No manager proxies, no locks — all writes happen in the main process.
+    """
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
     min_lat, max_lat, min_lon, max_lon = ll_limits
@@ -40,13 +96,11 @@ def harvest_process(lt_year_data, year, harvest_path, harvest_name, grazing_path
         / f"harvest_{year}_{min_lat:.0f}_{min_lon:.0f}"
     )
 
-    # --- read source data (full global arrays; slicing happens inside regrid) ---
-    harvest_data = landgen_io.read_luh2_harvest(year, harvest_path, harvest_name)
-    grazing_data = landgen_io.read_hyde_grazing(year, grazing_path, grazing_names)
+    # convert HEALPix cell_ids to positional row indices into lt_year_data arrays
+    row_indices = np.array([cellid_to_idx[int(cid)] for cid in cell_ids], dtype=np.int64)
 
-    # --- regrid and store harvest variables into lt_year_data.harvest_frac ---
-    # LUH2_HARVEST_VARS order matches the n_harvest=5 dimension in LtData:
-    #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
+    # --- regrid harvest variables ---
+    harvest_results = []
     for i, varname in enumerate(landgen_io.LUH2_HARVEST_VARS):
         regridded = landgen_io.regrid_to_landgen_grid(
             harvest_data[varname],
@@ -57,12 +111,10 @@ def harvest_process(lt_year_data, year, harvest_path, harvest_name, grazing_path
             tmp_dir / varname,
             varname,
         )
-        with lt_lock:
-            lt_year_data.harvest_frac[cell_ids, i] = regridded
+        harvest_results.append((i, regridded))
 
-    # --- regrid and store grazing variables into lt_year_data.grazing_frac ---
-    # grazing_names dict order matches n_grazing=2 dimension in LtData:
-    #   index 0: pasture (grazing_land), index 1: rangeland
+    # --- regrid grazing variables ---
+    grazing_results = []
     for i, category in enumerate(grazing_names.keys()):
         regridded = landgen_io.regrid_to_landgen_grid(
             grazing_data[category],
@@ -73,10 +125,9 @@ def harvest_process(lt_year_data, year, harvest_path, harvest_name, grazing_path
             tmp_dir / category,
             category,
         )
-        with lt_lock:
-            lt_year_data.grazing_frac[cell_ids, i] = regridded
+        grazing_results.append((i, regridded))
 
-    return
+    return row_indices, harvest_results, grazing_results
 
 
 ########## run()
@@ -85,7 +136,7 @@ def harvest_process(lt_year_data, year, harvest_path, harvest_name, grazing_path
 ## this sets up the pool and calls the harvest_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, manager, grid_manager, lt_manager):
+        com_config_dict, out_grid_data, manager, grid_manager):
 
     print(f"Processing harvest module with parameters:")
     # todo: print the parameters here
@@ -100,22 +151,33 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     global_mesh_df = pd.read_parquet(global_parquet_path)
     print(f"  Loaded HEALPix mesh: {len(global_mesh_df)} cells from {global_parquet_path}")
 
+    # read source data once here — workers reuse via initializer globals
+    print(f"  Reading LUH2 harvest data for year {year}...")
+    harvest_data = landgen_io.read_luh2_harvest(year, harvest_path, harvest_name)
+    print(f"  Reading HYDE grazing data for year {year}...")
+    grazing_data = landgen_io.read_hyde_grazing(year, grazing_path, grazing_names)
+
+    # build a mapping from HEALPix cellid -> positional row index in lt_year_data arrays
+    # the row order matches the order of cells in global_mesh_df (sorted by cellid)
+    sorted_cellids = np.sort(global_mesh_df['cellid'].values)
+    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(sorted_cellids)}
+
     # number of available cpu cores (set by SBATCH during job submission)
     omp_threads_str = os.environ.get('OMP_NUM_THREADS')
 
     if omp_threads_str is not None:
         try:
-            # Convert the string value to an integer
             omp_threads_int = int(omp_threads_str)
             print(f"OMP_NUM_THREADS is set to: {omp_threads_int}")
         except ValueError:
-            print(f"OMP_NUM_THREADS is set to an invalid integer value: {omp_threads_str}")
+            print(f"OMP_NUM_THREADS is set to an invalid integer value: {omp_threads_str}; falling back to 32")
+            omp_threads_int = 32
     else:
         print("OMP_NUM_THREADS environment variable is not set.")
-        # If not set, set to total cores on the node
-        omp_threads_int = mp.cpu_count()
-        print(f"Using total cores: {omp_threads_int}, but this may fail if "
-              "SBATCH --cpus-per-task is set to a lower number or SBATCH --exclusive is not set")
+        # Default to 4 — safe for login nodes and small test runs.
+        # On a full SLURM allocation, always set OMP_NUM_THREADS via the job script.
+        omp_threads_int = 4
+        print(f"Using {omp_threads_int} workers (default; set OMP_NUM_THREADS to override).")
 
     # set up the pool and call the harvest_process() function for each chunk of data
     # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
@@ -123,17 +185,13 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # there are more chunks than cpus; the pool will manage this for efficiency because chunks vary in size
     # the results will be stored directly in the lt_year_data shared structure
 
-    # get the manager locks for the shared data structures
-    # all locks come from the main mp.Manager() (SyncManager); custom managers don't support Lock()
-    man_lock  = manager.Lock()
-    grid_lock = manager.Lock()
-    lt_lock   = manager.Lock()
-
-    # Build data_chunks: one tuple per spatial chunk covering the globe in 10x10 degree boxes.
-    # For each chunk, filter the global mesh to cells whose centroid lat/lon falls within the box.
-    from . import land_type as _lt
-    decomp_box_size_degrees = 10
-    chunk_ll_limits = _lt.calc_ll_limits(decomp_box_size_degrees)
+    # Build data_chunks: one tuple per spatial chunk.
+    # Use 5x5 degree boxes (1440 chunks) instead of 10x10 (360 chunks) to reduce
+    # per-chunk variance: tropical land chunks at 10° can take 500+s while polar
+    # chunks take 3s, creating severe load imbalance at the end of the job.
+    # Smaller chunks keep all workers busy until the very end.
+    decomp_box_size_degrees = 5
+    chunk_ll_limits = landgen_io.calc_ll_limits(decomp_box_size_degrees)
 
     data_chunks = []
     for ll in chunk_ll_limits:
@@ -146,14 +204,38 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
         if len(chunk_cell_ids) == 0:
             continue  # skip ocean-only or empty chunks
         data_chunks.append((
-            lt_year_data, year, harvest_path, harvest_name, grazing_path, grazing_names,
-            com_config_dict, out_grid_data, ll, chunk_cell_ids,
-            global_mesh_df, man_lock, grid_lock, lt_lock,
+            year, ll, chunk_cell_ids,
         ))
 
-    print(f"  Submitting {len(data_chunks)} harvest chunks to pool of {omp_threads_int} workers")
+    # Sort largest chunks first (most cells = slowest) so they are dispatched
+    # immediately and don't create a long tail at the end of the job.
+    data_chunks.sort(key=lambda t: len(t[2]), reverse=True)
 
-    with mp.Pool(processes=omp_threads_int) as pool:
-        pool.starmap(harvest_process, data_chunks)
+    n_chunks = len(data_chunks)
+    print(f"  Submitting {n_chunks} harvest chunks to pool of {omp_threads_int} workers")
+
+    # Use fork-based Pool with an initializer that sets worker globals once at startup.
+    # - fork: workers inherit parent memory (numpy arrays are copy-on-write) — no
+    #         per-task pickling of large data, no expensive Python re-import overhead.
+    # - initializer: sets plain numpy/dict globals BEFORE any task runs, so no
+    #         manager proxy objects are ever present in the forked workers.
+    # - Workers return results; the main process writes to lt_year_data — no proxy
+    #         connections from worker processes, so no manager deadlock.
+    fork_ctx = mp.get_context('fork')
+    with fork_ctx.Pool(
+            processes=omp_threads_int,
+            initializer=_worker_init,
+            initargs=(global_mesh_df, cellid_to_idx, com_config_dict,
+                      harvest_data, grazing_data, grazing_names)) as pool:
+        done_count = 0
+        for row_indices, harvest_results, grazing_results in pool.imap_unordered(
+                _harvest_process_star, data_chunks):
+            for i, regridded in harvest_results:
+                lt_year_data.set_harvest_frac(row_indices, i, regridded)
+            for i, regridded in grazing_results:
+                lt_year_data.set_grazing_frac(row_indices, i, regridded)
+            done_count += 1
+            if done_count % 50 == 0 or done_count == n_chunks:
+                print(f"  Harvest progress: {done_count}/{n_chunks} chunks done", flush=True)
 
     return

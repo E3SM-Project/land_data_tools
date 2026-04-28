@@ -302,6 +302,27 @@ class LtData:
         self.cv_wall            = np.zeros((n_cells, n_levurb),   dtype=np.float64)
         self.cv_improad         = np.zeros((n_cells, n_levurb),   dtype=np.float64)
 
+    # --- getter methods for proxy access via LtManager ---
+    def get_harvest_frac(self):  return self.harvest_frac
+    def get_harvest_mass(self):  return self.harvest_mass
+    def get_grazing_frac(self):  return self.grazing_frac
+    def get_pct_pft(self):       return self.pct_pft
+    def get_pct_ocean(self):     return self.pct_ocean
+    def get_pct_lake(self):      return self.pct_lake
+    def get_pct_wetland(self):   return self.pct_wetland
+    def get_pct_glacier(self):   return self.pct_glacier
+    def get_pct_urban(self):     return self.pct_urban
+
+    # --- setter methods for proxy access via LtManager ---
+    def set_harvest_frac(self, cell_ids, i, values):
+        self.harvest_frac[cell_ids, i] = values
+    def set_harvest_mass(self, cell_ids, i, values):
+        self.harvest_mass[cell_ids, i] = values
+    def set_grazing_frac(self, cell_ids, i, values):
+        self.grazing_frac[cell_ids, i] = values
+    def set_pct_pft(self, cell_ids, i, values):
+        self.pct_pft[cell_ids, i] = values
+
 
 # ---------------------------------------------------------------------------
 # LtManager: custom BaseManager that can vend LtData proxy objects to

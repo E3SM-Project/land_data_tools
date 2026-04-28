@@ -8,6 +8,7 @@ import importlib
 import json
 import sys
 from pathlib import Path
+import pandas as pd
 from . import shared_data
 from .shared_data import GridData, GridManager
 
@@ -36,9 +37,19 @@ def main(config_path):
 	grid_manager = GridManager()
 	grid_manager.start()
 	out_grid_data = grid_manager.GridData()
-	out_grid_data.allocate()
 
-	## todo: read in the grid file and set the values in out_grid_data
+	# read the HEALPix mesh to determine n_cells and populate cell_id
+	global_parquet_path = (
+		Path(temp_dict['source_data_path'])
+		/ Path(temp_dict['landgen_grid_path']).parent
+		/ 'merged_land_cells.parquet'
+	)
+	_mesh_df = pd.read_parquet(global_parquet_path, columns=['cellid'])
+	n_cells = len(_mesh_df)
+	out_grid_data.allocate(n_cells=n_cells)
+	out_grid_data.set_cell_id(_mesh_df['cellid'].values)
+
+	## todo: read in the grid file and set the remaining values in out_grid_data (lon, lat, area, etc.)
 
 	for mod in modules:
 		name = mod['name']

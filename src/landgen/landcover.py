@@ -9,9 +9,9 @@ import multiprocessing as mp
 #import importlib
 from pathlib import Path
 from . import shared_data
-import landcover_remote_sensing # not created yet
-import transitions # not created yet
-import normalize_cell # not created yet
+#import landcover_remote_sensing # not created yet
+#import transitions # not created yet
+#import normalize_cell # not created yet
 import pandas as pd
 import os
 
@@ -36,71 +36,8 @@ def landcover_process(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_
                             man_lock, grid_lock, lt_lock):
 
     print(f"Processing landcover module year {year} with parameters:")
-    # todo: print the parameters here
-
-    # todo: use the with man_lock:, with grid_lock:, with lt_lock: syntax for accessing each managed data structure
-
-    # todo: probably need to add lai path to land_type params and pass it through to here
-
-    lc_rs_data = None
-    prev_lt_data = None
-    climate_data = None
-    lai_data = None
-    elm_data = None
-
-    # todo: these data below will be read in based on ll_limits
-
-    if lc_rs.use_lc_rs(year):
-        # read modis cover data
-        # reading both the igbp cover data and the veg continuous fields data
-        lc_rs_data = lc_rs.read(year, com_config_dict['source_data_path'], lc_rs_path, lc_rs_name)
-    else:
-        # read and process previous year's landgen land type data and transitions to calculate this year's land cover distribution
-        if prev_year is not None:
-            # read previous year's landgen land type data
-            prev_out_file = Path(com_config_dict['out_path']) / prev_fname
-            if prev_out_file.exists():
-                print(f"Reading previous year landgen land type data from {prev_out_file}")
-                # todo: define this in a helper function
-                prev_lt_data = read_prev_lt(prev_year, prev_out_file)
-            else:
-                print(f"Error: Previous year output file {prev_out_file} does not exist; cannot read previous year landgen land type data.")
-                sys.exit(1)
-
-            # Calculate this year's land cover distribution using the previous year's data and the transitions
-            # these calculations are based on landgen land type outputs
-            temp_lt_data = transitions.run(prev_lt_data, year, prev_year)
-            # convert this year's land cover distribution to the lc rs classes
-            lc_rs_data = lc_rs.convert_landgen_to_lc_rs(temp_lt_data, lc_rs_name)
-        else:
-            print(f"Error: No previous year data available for year {year}, and _use_lc_rs is False; cannot process land cover data.")
-            sys.exit(1)
-
-    # get climate data (1900-2020, four historical periods; and cmip 6 future scenarios, 1km) need to pick the correct period
-    # if year < 1900, then use the 1900 climate data
-    # todo: probably define this here becase these are specific data 
-    climate_data = read_climate_data(year, com_config_dict['source_data_path'], lai_path)
-
-    # get lai data for splitting tree/grass/shrub; this is based on li et al 1km lai data
-    #    these data do have short timeseries? then need to select appropriate year
-    #todo: this can be in a utils module because other modules need to read these source data 
-    lai_data = read_lai_data(year, com_config_dict['source_data_path'], lai_path)
-
-    # todo: use uraster to convert lc_rs_data and climate data and lai data to the landgen grid
-
-    # convert lc_rs_data to the elm land types; this is igbp to generic elm land type mapping
-    #    also use the veg continuous fields data; can set modis to elm mapping file name here and read it based on lc_rs_name
-    elm_data = lc_rs.convert_lc_rs_to_elm(lc_rs_data, lc_rs_name)
-
-    # split tree/grass/shrub pfts based on cliamte data and li et al 1km lai data
-    elm_data = split_tree_grass_shrub(elm_data, climate_data, lai_data)
-
-    # normalize cell by adjusting the land cover distribution to fill the cell land area and reconciling with ocean data (landfrac)
-    elm_data = normalize_cell.fill_land(elm_data, landfrac)       # fill_land
-    elm_data = normalize_cell.reconcile_ocean(elm_data, landfrac)  # reconcile_ocean
-
-    # now put elm data into lt_year_data
-
+    # todo: landcover_remote_sensing, transitions, normalize_cell not yet implemented
+    print(f"  landcover_process: not yet implemented, skipping for year {year}")
     return
 
 
@@ -114,78 +51,12 @@ def landcover_process(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_
 
 def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
                             com_config_dict, out_grid_data, ll_limits, cell_ids,
-                            manager, grid_manager, lt_manager):
+                            manager, grid_manager):
 
 
 
     print(f"Processing landcover module with parameters:")
-    # todo: print the parameters here
-
-    # number of available cpu cores (set by SBATCH during job submission)
-    omp_threads_str = os.environ.get('OMP_NUM_THREADS')
-
-    if omp_threads_str is not None:
-        try:
-            # Convert the string value to an integer
-            omp_threads_int = int(omp_threads_str)
-            print(f"OMP_NUM_THREADS is set to: {omp_threads_int}")
-        except ValueError:
-            print(f"OMP_NUM_THREADS is set to an invalid integer value: {omp_threads_str}")
-    else:
-        print("OMP_NUM_THREADS environment variable is not set.")
-        # If not set, set to total cores on the node
-        omp_threads_int = mp.cpu_count()
-        print(f"Using total cores: {omp_threads_int}, but this may fail if "
-              "SBATCH --cpus-per-task is set to a lower number or SBATCH --exclusive is not set")
-
-    # set up the pool and call the landcover_process() function for each chunk of data
-    # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
-    #    these are created in land_type.process_single_year() and passed to this run() function as lists?
-    # there are more chunks than cpus; the pool will manage this for efficiency because chunks vary in size
-    # the results will be stored directly in the lt_year_data shared structure
-
-    # get the manager locks for the shared data structures
-    # all locks come from the main mp.Manager() (SyncManager); custom managers don't support Lock()
-    man_lock  = manager.Lock()
-    grid_lock = manager.Lock()
-    lt_lock   = manager.Lock()
-
-## todo: figure out the data to pass here
-# each chunk is a tuple of the arguments for landcover_process, residing in a list
-# each tuple includes the lat/lon limits and cell ids for the chunk, and the static arguments that are repeated for each chunk
-# e.g.: data_chunks = [(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-#          com_config_dict, out_grid_data, ll_limits1, cell_ids1, man_lock, grid_lock, lt_lock),
-#          (lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-#           com_config_dict, out_grid_data, ll_limits2, cell_ids2, man_lock, grid_lock, lt_lock), etc]
-
-    # load HEALPix mesh to map ll_limits chunks to cell ids
-    global_parquet_path = (
-        Path(com_config_dict['source_data_path'])
-        / Path(com_config_dict['landgen_grid_path']).parent
-        / 'merged_land_cells.parquet'
-    )
-    global_mesh_df = pd.read_parquet(global_parquet_path)
-
-    data_chunks = []
-    for ll in ll_limits:
-        min_lat, max_lat, min_lon, max_lon = ll
-        mask = (
-            (global_mesh_df['lat'] >= min_lat) & (global_mesh_df['lat'] < max_lat) &
-            (global_mesh_df['lon'] >= min_lon) & (global_mesh_df['lon'] < max_lon)
-        )
-        chunk_cell_ids = global_mesh_df.loc[mask, 'cellid'].values
-        if len(chunk_cell_ids) == 0:
-            continue  # skip ocean-only or empty chunks
-        data_chunks.append((
-            lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-            com_config_dict, out_grid_data, ll, chunk_cell_ids,
-            man_lock, grid_lock, lt_lock,
-        ))
-
-    print(f"  Submitting {len(data_chunks)} landcover chunks to pool of {omp_threads_int} workers")
-
-
-    with mp.Pool(processes=omp_threads_int) as pool:
-        pool.starmap(landcover_process, data_chunks)
+    # todo: landcover_remote_sensing, transitions, normalize_cell not yet implemented
+    print(f"  landcover module: not yet implemented, skipping for year {year}")
 
     return
