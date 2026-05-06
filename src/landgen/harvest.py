@@ -16,6 +16,17 @@ import os
 import traceback
 import time
 
+########## define some module-specific constants here
+
+# Default harvest variable names from LUH2 transitions.nc
+LUH2_HARVEST_VARS = [
+    'primf_harv',   # wood harvest area from primary forest land
+    'primn_harv',   # wood harvest area from primary non forest land
+    'secmf_harv',   # wood harvest area from secondary mature forest land
+    'secyf_harv',   # wood harvest area from secondary young forest land
+    'secnf_harv',   # wood harvest area from secondary non forest land
+]
+
 ########## define helper functions for harvest run() here
 
 ##### harvest_process()
@@ -101,7 +112,11 @@ def _harvest_process_impl(year, grazing_names,
 
     # --- regrid harvest variables ---
     harvest_results = []
-    for i, varname in enumerate(landgen_io.LUH2_HARVEST_VARS):
+
+    # --- regrid and store harvest variables into lt_year_data.harvest_frac ---
+    # LUH2_HARVEST_VARS order matches the n_harvest=5 dimension in LtData:
+    #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
+    for i, varname in enumerate(LUH2_HARVEST_VARS):
         regridded = landgen_io.regrid_to_landgen_grid(
             harvest_data[varname],
             harvest_data['lat'],
@@ -136,7 +151,7 @@ def _harvest_process_impl(year, grazing_names,
 ## this sets up the pool and calls the harvest_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, manager, grid_manager):
+        com_config_dict, out_grid_data, manager, grid_manager, lt_manager, decomp_indices, decomp_ll_limits):
 
     print(f"Processing harvest module with parameters:")
     # todo: print the parameters here
@@ -185,13 +200,21 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # there are more chunks than cpus; the pool will manage this for efficiency because chunks vary in size
     # the results will be stored directly in the lt_year_data shared structure
 
+    # get the manager locks for the shared data structures
+    # using data-specific locks, watch out for deadlocks.  
+    man_lock  = manager.Lock()
+    grid_lock = grid_manager.lock()
+    lt_lock   = lt_manager.lock()
+
     # Build data_chunks: one tuple per spatial chunk.
     # Use 5x5 degree boxes (1440 chunks) instead of 10x10 (360 chunks) to reduce
     # per-chunk variance: tropical land chunks at 10° can take 500+s while polar
     # chunks take 3s, creating severe load imbalance at the end of the job.
     # Smaller chunks keep all workers busy until the very end.
+
+    from . import land_type as _lt
     decomp_box_size_degrees = 5
-    chunk_ll_limits = landgen_io.calc_ll_limits(decomp_box_size_degrees)
+    chunk_ll_limits = _lt.calc_ll_limits(decomp_box_size_degrees)
 
     data_chunks = []
     for ll in chunk_ll_limits:

@@ -55,7 +55,7 @@ class GridData:
     """Per-cell grid geometry container (cell ids, coordinates, landfrac)."""
 
     def __init__(self):
-
+        self.lock = Lock()  # lock for synchronizing access to this data structure across processes
         self.num_cells   = None    # int     - number of 'land' cells in out grid
         self.num_vertices   = None    # int  - number of vertices per cell
         self.cell_id  = None    # int64   [n_cells]
@@ -119,6 +119,7 @@ class TopoData:
     """Per-cell topography data container for the landgen workflow."""
 
     def __init__(self):
+        self.lock = Lock()  # lock for synchronizing access to this data structure across processes
         self.topo            = None    # float64 [n_cells]          - topographic height
         self.std_elev        = None    # float32 [n_cells]          - standard deviation of elevation
         self.slope           = None    # float64 [n_cells]          - mean slope

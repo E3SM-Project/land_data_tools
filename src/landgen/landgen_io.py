@@ -10,15 +10,177 @@ from rasterio.transform import from_bounds
 import json
 import shapely.wkb
 from uraster.classes.uraster import uraster as URaster
+from pymodis import downmodis, modis_mosaic, modis_convert
+import glob
+import os
+import math
+from pyproj import Proj
+from osgeo import gdal
 
-# Default harvest variable names from LUH2 transitions.nc
-LUH2_HARVEST_VARS = [
-    'primf_harv',   # wood harvest area from primary forest land
-    'primn_harv',   # wood harvest area from primary non forest land
-    'secmf_harv',   # wood harvest area from secondary mature forest land
-    'secyf_harv',   # wood harvest area from secondary young forest land
-    'secnf_harv',   # wood harvest area from secondary non forest land
-]
+
+#--------------------------------------------------------------------------
+def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits,
+                              chunk_size_degrees=10):
+    """
+    Populate chunk_indices and chunk_ll_limits in-place from the domain NetCDF.
+    Also write a companion .npz file mapping chunk lat-lon limits to cell indices.
+
+    Approx. cell-centre lat/lon assigns each cell to a chunk box.  Vertex coordinates
+    xv/yv determine the tight actual bounding box of the cells in that chunk,
+    which is what callers (e.g. write_latlon_to_geotiff) need for source-data
+    slicing — the fixed chunk box may extend into ocean where no source data exist.
+
+    Chunks with no land cells are skipped, so len(chunk_indices) may be less
+    than the total number of chunk boxes.
+
+    Based on HealPix mesh, but any mesh with the same variables in the same format should work.
+
+    Args:
+        nc_path_name (str|Path):      Path (and name) to the domain NetCDF file containing
+                                 'lat', 'lon' (~ cell centres), 'xv', 'yv'
+                                 (vertex coordinates, shape n_cells x n_vertices).
+        chunk_indices (list):    Output — populated in-place.  Each element is a
+                                 1D tuple of row indices for the NC file
+                                 identifying the cells in that chunk.
+        chunk_ll_limits (list):  Output — populated in-place.  Each element is a
+                                 (min_lat, max_lat, min_lon, max_lon) tuple of the
+                                 tight vertex bounding box for that chunk's cells.
+                                 Matched by position to chunk_indices.
+        chunk_size_degrees (int): Size of the decomposition boxes in degrees.
+    """
+    nc_path = Path(nc_path_name)
+    if not nc_path.exists():
+        raise FileNotFoundError(f"Mesh NetCDF file not found: {nc_path}")
+
+    # read the full file once — this is a one-time setup call
+    # note that lat and lon are approximate cell centers
+    ds  = xr.open_dataset(nc_path, decode_times=False)
+    lat = ds['lat'].values.astype(np.float64)   # (n_cells,)
+    lon = ds['lon'].values.astype(np.float64)   # (n_cells,)
+    xv  = ds['xv'].values.astype(np.float64)    # (n_cells, n_vertices)
+    yv  = ds['yv'].values.astype(np.float64)    # (n_cells, n_vertices)
+    ds.close()
+
+    decomp_indices.clear()
+    decomp_ll_limits.clear()
+
+    index = {}
+    for min_lat, max_lat, min_lon, max_lon in calc_ll_limits(chunk_size_degrees):
+        mask    = (lat >= min_lat) & (lat < max_lat) & (lon >= min_lon) & (lon < max_lon)
+        indices = np.where(mask)[0]
+        if indices.size == 0:
+            continue  # skip ocean-only boxes
+
+        # tight bounding box from actual vertex extents of the cells in this chunk
+        xv_chunk = xv[indices]   # (n_chunk_cells, n_vertices)
+        yv_chunk = yv[indices]
+        decomp_indices.append(tuple(indices.tolist()))
+        decomp_ll_limits.append((
+            float(yv_chunk.min()), float(yv_chunk.max()),
+            float(xv_chunk.min()), float(xv_chunk.max()),
+        ))
+
+        # create dictionary for compainion file
+        key = f"{min_lat:.0f}_{max_lat:.0f}_{min_lon:.0f}_{max_lon:.0f}"
+        index[key] = indices
+
+    # write companion file
+    out_path = Path(nc_path).with_suffix('.spatial_index.npz')
+    np.savez_compressed(out_path, **index)
+    
+    print(f"  set_decomp_cell_idx_ll_limits: built {len(decomp_indices)} chunks from {nc_path}")
+    print(f"  set_decomp_cell_idx_ll_limits: chunks include {sum(len(t) for t in decomp_indices)} cells")
+    print(f"  set_decomp_cell_idx_ll_limits: check against total cells in {nc_path} to ensure all are included")
+    print(f"  set_decomp_cell_idx_ll_limits: wrote {len(index)} chunks to {out_path}")
+
+    return out_path
+
+#--------------------------------------------------------------------------
+def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
+    """
+    Load HEALPix mesh data from a NetCDF domain file.
+
+    Args:
+        nc_path_name (str|Path):      Path (and name) to the domain NetCDF file.
+        indices (tuple|None): 1D tuple of NC indices to load,
+                                   as returned in chunk_indices by
+                                   set_chunk_cell_idx_ll_limits().  If None,
+                                   check for ll_limits.
+        ll_limits (tuple|None): (min_lat, max_lat, min_lon, max_lon) tuple
+                                to select cells by mapping file.  If also None,
+                                no lat/lon filtering is applied. This option
+                                uses the companion .npz spatial mapping file
+                                created by set_chunk_cell_idx_ll_limits().
+
+    Returns:
+        dict with keys 'cellid', 'xv', 'yv', 'lon', 'lat' (all np.ndarray).
+    """
+    nc_path = Path(nc_path_name)
+    if not nc_path.exists():
+        raise FileNotFoundError(f"Mesh NetCDF file not found: {nc_path}")
+
+    ds = xr.open_dataset(nc_path, decode_times=False)
+
+    if indices is not None:
+        cell_dim = ds['lat'].dims[0]
+        subset   = ds.isel({cell_dim: indices})
+    elif ll_limits is not None:
+        min_lat, max_lat, min_lon, max_lon = ll_limits
+        key      = f"{min_lat:.0f}_{max_lat:.0f}_{min_lon:.0f}_{max_lon:.0f}"
+        idx_path = nc_path.with_suffix('.spatial_index.npz')
+        if not idx_path.exists():
+            raise FileNotFoundError(
+                f"Spatial index not found: {idx_path}. "
+                f"Run set_chunk_cell_idx_ll_limits('{nc_path}', chunk_indices, chunk_ll_limits) first."
+            )
+        indices_ll  = np.load(idx_path)[key]
+        if indices_ll.size == 0:
+            ds.close()
+            raise ValueError(f"No mesh cells found within ll_limits {ll_limits}.")
+        cell_dim = ds['lat'].dims[0]
+        subset   = ds.isel({cell_dim: indices_ll})
+    else:
+        subset = ds
+
+    cellid = subset['cellid'].values.astype(np.int64)
+    xv     = subset['xv'].values.astype(np.float64)
+    yv     = subset['yv'].values.astype(np.float64)
+    lon    = subset['lon'].values.astype(np.float64)
+    lat    = subset['lat'].values.astype(np.float64)
+    ds.close()
+
+    print(f"  load_mesh_nc: loaded {len(cellid)} cells from {nc_path}")
+    return {'cellid': cellid, 'xv': xv, 'yv': yv, 'lon': lon, 'lat': lat}
+
+
+
+#--------------------------------------------------------------------------
+def calc_ll_limits(size_degrees):
+    """Calculate and return a list of tuples (min_lat, max_lat, min_lon, max_lon)
+    for each size_degrees x size_degrees chunk covering the globe.
+
+    Latitude  spans -90 to  90 degrees.
+    Longitude spans -180 to 180 degrees.
+
+    Returns:
+        list of tuples: [(min_lat, max_lat, min_lon, max_lon), ...]
+    """
+    ll_limits = []
+    if 90 % size_degrees != 0 or 180 % size_degrees != 0:
+        raise ValueError(
+            f"size_degrees ({size_degrees}) must evenly divide "
+            f"both 90 (latitude half-range) and 180 (longitude half-range)."
+        )
+    lat = -90.0
+    while lat < 90.0:
+        max_lat = min(lat + size_degrees, 90.0)
+        lon = -180.0
+        while lon < 180.0:
+            max_lon = min(lon + size_degrees, 180.0)
+            ll_limits.append((lat, max_lat, lon, max_lon))
+            lon = max_lon
+        lat = max_lat
+    return ll_limits
 
 #--------------------------------------------------------------------------
 def _get_year_idx(time_values, year, ncfile, time_units=None):
@@ -88,6 +250,285 @@ def _get_year_idx(time_values, year, ncfile, time_units=None):
             f"(closest available: {actual_year:.0f})"
         )
     return year_idx
+
+
+
+
+###todo: write general hdf read function:
+
+#--------------------------------------------------------------------------
+def get_modis_tile_idx(lon, lat):
+    """
+    Calculate the MODIS tile indices (h, v) for a given longitude and latitude.
+    The MODIS Sinusoidal grid divides the globe into 36 horizontal (h) and 18 vertical (v) tiles,
+    each approximately 10 degrees in size. 
+    The tile indices start at (h=0, v=0) in the upper left corner (90N, 180W) and increase to the right and downward.
+
+    Returns:
+        tuple: (h, v) tile indices for the given longitude and latitude.
+    """
+    # Standard MODIS Sinusoidal parameters
+    R = 6371007.181
+    W = 2 * math.pi * R
+    T = W / 36
+    
+    # Project Lat/Lon to Sinusoidal
+    modis_grid = Proj(f'+proj=sinu +R={R} +nadgrids=@null +wktext')
+    x, y = modis_grid(lon, lat)
+    
+    # Calculate tile indices
+    h = int((x + W / 2) / T)
+    v = int((W / 4 - y) / T)
+    return h, v
+
+
+#--------------------------------------------------------------------------
+def get_modis_tile_idxs_ll(ll_limits):
+    """
+    Get the MODIS tile indices for a lat/lon bounding box.
+
+    Args:
+        ll_limits (tuple/list): 4-element (min_lat, max_lat, min_lon, max_lon).
+
+    Returns:
+        a cvs string of indices in modis name format: 'h##v##, ...' for the tiles that intersect the bounding box.
+    """
+    min_lat, max_lat, min_lon, max_lon = ll_limits
+    corners = [(min_lon, min_lat), (min_lon, max_lat), (max_lon, min_lat), (max_lon, max_lat)]
+    tile_idxs = [get_modis_tile_idx(lon, lat) for lon, lat in corners]
+    min_h = min(h for h, v in tile_idxs)
+    max_h = max(h for h, v in tile_idxs)
+    min_v = min(v for h, v in tile_idxs)
+    max_v = max(v for h, v in tile_idxs)
+    tile_idxs = [(h, v) for h in range(min_h, max_h + 1) for v in range(min_v, max_v + 1)]
+    tile_strs = [f"h{h:02d}v{v:02d}" for h, v in set(tile_idxs)]
+    return ", ".join(tile_strs)
+
+#--------------------------------------------------------------------------
+def get_sds_string(hdf_path_name, data_name):
+    """
+    Scans HDF subdatasets and returns a pyModis SDS string.
+    Example: '( 0 1 0 0 )' if the 2nd subdataset matches.
+    """
+    # Open the main HDF file
+    ds = gdal.Open(hdf_path_name)
+    # GetSubDatasets returns a list of (name, description) tuples
+    subdatasets = ds.GetSubDatasets()
+    
+    sds_bits = []
+    for sds_name, description in subdatasets:
+        # Check if the target name (e.g., 'LC_Type1') is in the description
+        if data_name in description:
+            sds_bits.append("1")
+        else:
+            sds_bits.append("0")
+            
+    # Format as '( 0 1 0 ... )' as required by modis_convert
+    return f"( {' '.join(sds_bits)} )"
+
+#--------------------------------------------------------------------------
+def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_limits=None):
+    """
+    Download MODIS HDF tiles for a given year, mosaic them, and convert each
+    requested variable to a GeoTIFF file in dir_path.
+
+    Args:
+        year (int): Year to extract.
+        dir_path (str or Path): Directory for downloaded HDF files and output GeoTIFFs.
+                                If called from a worker process, use a unique per-worker
+                                temp directory to avoid file collisions.
+                                The caller is responsible for removing this directory
+                                after processing is complete.
+        product (str): MODIS product identifier (e.g. 'MCD12Q1.061').
+        variable_names (list): Variable (subdataset) names to convert. Must be provided.
+        ll_limits (tuple/list or None): 4-element (min_lat, max_lat, min_lon, max_lon).
+                                        When given, only the lat/lon rows/columns that overlap this region are read.
+                                        The slice is inclusive — any grid cell whose coordinate falls within
+                                        [min_lat, max_lat] x [min_lon, max_lon] is included.
+    Returns:
+        dict: {varname: Path} mapping each variable name to the Path of the GeoTIFF
+              written to dir_path.
+    """
+
+    ###### need an Earthdata username and password to download MODIS data;
+    # user must set up a .netrc file in their home directory (~/.netrc) with their credentials on one line, e.g.:
+    # machine urs.earthdata.nasa.gov login <myusername> password <mypassword>
+    # and set the file permissions to user read/write only (chmod 600 ~/.netrc) to protect their credentials
+
+    dir_path = Path(dir_path)
+    output_dir = dir_path   # GeoTIFFs are written to the same directory as the downloaded HDF files
+
+    # bbox for modis_convert spatial subsetting: (min_lon, max_lon, min_lat, max_lat)
+    # None means no spatial subsetting (full tile extent)
+    if ll_limits is not None:
+        min_lat, max_lat, min_lon, max_lon = ll_limits
+        bbox = (min_lon, max_lon, min_lat, max_lat)
+    else:
+        bbox = None
+
+    # latest_date and earliest_date are in 'YYYY-MM-DD' format
+    latest_date = f"{year}-12-31"
+    earliest_date = f"{year}-01-01"
+
+    # identify the tile files based on ll_limits and create a string of modis indices for downmodis()
+    if ll_limits is not None:
+        tiles_str = get_modis_tile_idxs_ll(ll_limits)
+
+        # download a subset of the tiles with downmodis()
+        downloader = downmodis.downmodis(
+            destinationFolder=dir_path,
+            tiles=tiles_str,
+            product=product,
+            today=latest_date,
+            enddate=earliest_date
+        )
+    else:
+        # download all tiles for the year with downmodis()
+        downloader = downmodis.downmodis(
+            destinationFolder=dir_path,
+            product=product,
+            today=latest_date,
+            enddate=earliest_date
+        )
+
+    # Run download
+    try:
+        downloader.downloads()
+    except Exception as e:
+        raise RuntimeError(
+            f"read_modis_ll_to_geotiff: MODIS download failed for product '{product}', year {year}: {e}"
+        ) from e
+
+    # use modis_mosaic() to mosaic the tiles together if more than one file is needed to cover the ll_limits
+    os.makedirs(dir_path, exist_ok=True)
+    # list of strings of all HDF files downloaded
+    hdf_files = [str(f) for f in dir_path.glob('*.[hH][dD][fF]')]
+    # Mosaic the tiles (combines tiles for each date)
+    mosaic_output = str(dir_path / f'mosaic_{year}.hdf')
+    m = modis_mosaic.modis_mosaic(hdf_files, mosaic_output)
+    try:
+        m.run()
+    except Exception as e:
+        raise RuntimeError(
+            f"read_modis_ll_to_geotiff: MODIS mosaic failed for product '{product}', year {year}: {e}"
+        ) from e
+
+    # generate the sds input string for modis_convert() based on the variable_names list
+
+    # use modis_convert() to convert each desired variable to GeoTIFF with ll_limits as the bounding box
+    # Convert mosaicked HDF to GeoTIFF and select specific subdataset
+
+    out = {}
+    for var in variable_names:
+        # get the sds string for this variable
+        # Example: '( 0 1 0 0 )' to select the 2nd subdataset matching var
+        sds_str = get_sds_string(hdf_files[0], var)
+        output_tif = output_dir / f"{var}_{year}.tif"
+        converter = modis_convert.modis_convert(
+            mosaic_output,
+            str(output_dir),
+            output_filename=str(output_tif),
+            sds=sds_str,           # Example: '( 0 1 0 0 )' to select the 2nd subdataset matching var
+            subset=bbox,           # Applies spatial subsetting
+            epsg=4326              # Re-projects to WGS84
+        )
+        try:
+            converter.run()
+        except Exception as e:
+            raise RuntimeError(
+                f"read_modis_ll_to_geotiff: MODIS convert failed for variable '{var}', product '{product}', year {year}: {e}"
+            ) from e
+        out[var] = output_tif
+
+    return out
+
+
+
+
+
+###todo: finish and test read_netcdf general function
+
+
+#--------------------------------------------------------------------------
+def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
+    """
+    Read variables from a NetCDF file for a given year.
+
+    Args:
+        year (int): Year to extract.
+        file_path_name (str or Path): Full path to the NetCDF file.
+        variable_names (list or None): Variables to extract. Must be provided.
+        ll_limits (tuple/list or None): 4-element (min_lat, max_lat, min_lon, max_lon).
+                                        When given, only the lat/lon rows/columns that
+                                        overlap this region are read.  The slice is
+                                        inclusive — any grid cell whose coordinate falls
+                                        within [min_lat, max_lat] x [min_lon, max_lon]
+                                        is included, so cells that straddle the boundary
+                                        are never dropped.
+
+    Returns:
+        dict: {varname: 2D np.ndarray shape (lat, lon)} for the requested year,
+              plus 'lat' and 'lon' coordinate arrays (possibly subsetted).
+    """
+
+    ncfile = Path(file_path_name)
+    if not ncfile.exists():
+        raise FileNotFoundError(f"NetCDF file not found: {ncfile}")
+
+    ds = xr.open_dataset(ncfile, decode_times=False)
+
+    if variable_names is None:
+        # Raise an error
+        # consider reading all variables in file instead of raising an error?
+        raise KeyError(f"Variable names must be provided in the json input file for {ncfile}. "
+                       f"Available variables: {list(ds.data_vars)}")
+
+    time_units = ds['time'].attrs.get('units', None)
+    # _get_year_idx() handles both 'years since' and 'days since' patterns,
+    #    as well as the case of no time units (assumed calendar years)
+    # add cases to _get_year_idx as needed if other time unit patterns are encountered in source data
+    year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
+    print(f"  read_netcdf: reading year {year} (time index {year_idx}) from {ncfile}")
+
+    ####todo: this currently assumes that the variables lat/lon are ~cell centers
+    # need to allow for other variable names to represent these coordinates 
+
+    # if ll_limits=None, do not subset the data; otherwise subset by ll_limits
+    if ll_limits is not None:
+        min_lat, max_lat, min_lon, max_lon = ll_limits
+        lat_vals = ds['lat'].values
+        lon_vals = ds['lon'].values
+
+        # add a one-cell buffer so cells that straddle the boundary are included
+        lat_step = float(abs(lat_vals[1] - lat_vals[0])) if lat_vals.size > 1 else 0.0
+        lon_step = float(abs(lon_vals[1] - lon_vals[0])) if lon_vals.size > 1 else 0.0
+
+        lat_mask = (lat_vals >= min_lat - lat_step) & (lat_vals <= max_lat + lat_step)
+        lon_mask = (lon_vals >= min_lon - lon_step) & (lon_vals <= max_lon + lon_step)
+
+        lat_idx = np.where(lat_mask)[0]
+        lon_idx = np.where(lon_mask)[0]
+
+        if lat_idx.size == 0 or lon_idx.size == 0:
+            raise ValueError(
+                f"No grid cells found within ll_limits {ll_limits} in {ncfile}. "
+                f"lat range: [{lat_vals.min():.2f}, {lat_vals.max():.2f}], "
+                f"lon range: [{lon_vals.min():.2f}, {lon_vals.max():.2f}]"
+            )
+
+        lat_dim = ds['lat'].dims[0]
+        lon_dim = ds['lon'].dims[0]
+        ds = ds.isel({lat_dim: lat_idx, lon_dim: lon_idx})
+
+    out = {'lat': ds['lat'].values, 'lon': ds['lon'].values}
+    for v in variable_names:
+        if v not in ds:
+            raise KeyError(f"Variable '{v}' not found in {ncfile}. "
+                           f"Available variables: {list(ds.data_vars)}")
+        out[v] = ds[v].isel(time=year_idx).values  # shape: (lat, lon)
+
+    ds.close()
+    return out
 
 
 #--------------------------------------------------------------------------
@@ -239,7 +680,7 @@ def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
         crs='EPSG:4326',
         transform=transform,
         nodata=np.nan,
-    ) as dst:
+        ) as dst:
         # rasterio band 1 is row-ordered north-to-south; flip if lat is south-to-north
         if chunk_lat[0] < chunk_lat[-1]:
             dst.write(np.flipud(chunk_data), 1)
@@ -388,6 +829,28 @@ def regrid_to_landgen_grid(data_2d, src_lat, src_lon, cell_ids, ll_limits,
               f"non-zero: {np.count_nonzero(out)}")
         return out
 
+    except ValueError as e:
+        # raised by write_latlon_to_geotiff (no source cells in bounds) or
+        # write_chunk_mesh_to_geojson (no mesh cells for cell_ids) — treat as
+        # an empty chunk and return zeros rather than aborting the whole run
+        print(f"  regrid_to_landgen_grid: WARNING skipping empty '{varname}' chunk "
+              f"ll_limits={ll_limits}: {e}")
+        return np.zeros(len(cell_ids), dtype=np.float64)
+
+    except FileNotFoundError as e:
+        # raised by write_latlon_to_geotiff or load_mesh_nc — a missing input
+        # file is a configuration error; re-raise so the run fails clearly
+        raise RuntimeError(
+            f"regrid_to_landgen_grid: missing file for '{varname}' "
+            f"ll_limits={ll_limits}: {e}"
+        ) from e
+
+    except KeyError as e:
+        # raised by _get_year_idx / read_luh2_harvest — variable not in file
+        raise RuntimeError(
+            f"regrid_to_landgen_grid: variable lookup failed for '{varname}': {e}"
+        ) from e
+
     finally:
         # 6. clean up temp files regardless of success or failure
         for f in [tmp_raster, tmp_mesh_in, tmp_mesh_out]:
@@ -408,22 +871,6 @@ def regrid_to_landgen_grid(data_2d, src_lat, src_lon, cell_ids, ll_limits,
 
 #--------------------------------------------------------------------------
 
-def calc_ll_limits(size_degrees):
-    """Return a list of (min_lat, max_lat, min_lon, max_lon) tuples covering the globe
-    in size_degrees x size_degrees boxes.  Latitude: -90..90, Longitude: -180..180."""
-    if 90 % size_degrees != 0 or 180 % size_degrees != 0:
-        raise ValueError(
-            f"size_degrees ({size_degrees}) must evenly divide both 90 and 180"
-        )
-    ll_limits = []
-    lat = -90
-    while lat < 90:
-        lon = -180
-        while lon < 180:
-            ll_limits.append((lat, lat + size_degrees, lon, lon + size_degrees))
-            lon += size_degrees
-        lat += size_degrees
-    return ll_limits
 
 #--------------------------------------------------------------------------
 
@@ -503,3 +950,30 @@ def write_lt_year_data_to_netcdf(lt_year_data, cell_ids, year, out_path, out_fna
     return out_file
 
 #--------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------
+def get_chunk_cell_ids(size_degrees):
+    """Determine the landgen grid cell ids that intersect each lat-lon chunk.
+    There will be duplicate cell ids across chunks; filter these later      
+
+    Args:
+        size_degrees (float): Size of the lat-lon chunks in degrees (e.g. 10 for 10x10 degree chunks).
+
+    Returns:
+        list of arrays: A list where each element is a 1D array of cell ids for the corresponding chunk.
+    """
+    # This function would read the global HEALPix mesh and determine which cells fall into each lat-lon chunk.
+    # The implementation would depend on how the global mesh is structured and stored.
+    # For example, if the global mesh has 'cellid', 'lat', and 'lon' columns, we could do something like:
+
+    global_mesh_df = pd.read_parquet('path_to_global_mesh.parquet')  # adjust path as needed
+    ll_limits = calc_ll_limits(size_degrees)
+    chunk_cell_ids = []
+    for min_lat, max_lat, min_lon, max_lon in ll_limits:
+        mask = (
+            (global_mesh_df['lat'] >= min_lat) & (global_mesh_df['lat'] < max_lat) &
+            (global_mesh_df['lon'] >= min_lon) & (global_mesh_df['lon'] < max_lon)
+        )
+        cell_ids = global_mesh_df.loc[mask, 'cellid'].values
+        chunk_cell_ids.append(cell_ids)
+    return chunk_cell_ids

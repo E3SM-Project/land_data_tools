@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 import pandas as pd
 from . import shared_data
-from .shared_data import GridData, GridManager
+from . import landgen_io
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
@@ -29,12 +29,13 @@ def main(config_path):
 				'source_data_path': config.get('source_data_path', ''),
 				'landgen_grid_path': config.get('landgen_grid_path', ''),
 				'out_path': config.get('out_path', ''),
+				'decomp_box_size_degrees': config.get('decomp_box_size_degrees', 10)
 			}
 	manager = mp.Manager()
 	com_config_dict = manager.dict(temp_dict)
 
 	# create the shared landgen out grid shared data structure
-	grid_manager = GridManager()
+	grid_manager = shared_data.GridManager()
 	grid_manager.start()
 	out_grid_data = grid_manager.GridData()
 
@@ -51,24 +52,42 @@ def main(config_path):
 
 	## todo: read in the grid file and set the remaining values in out_grid_data (lon, lat, area, etc.)
 
-	for mod in modules:
-		name = mod['name']
-		params = mod.get('params', {})
-		try:
-			module = importlib.import_module(f'landgen.{name}')
-			if hasattr(module, 'run'):
-				print(f"Running module: {name}")
-				run_list = [*params.values(), com_config_dict, out_grid_data, manager, grid_manager]
-				module.run(*run_list)
-			else:
-				print(f"Module {name} does not have a 'run' function.")
-		except ImportError as e:
-			print(f"Could not import module {name}: {e}")
 
-		
-	# free the shared memory
-	com_config_dict = None
-	out_grid_data = None
-	manager.shutdown()
-	grid_manager.shutdown()
+    # these are lists of tuples with each tuple defining a chunk, and are paired in order
+    # decomp_indices: indices within each chunk for the landgen grid file variables 
+    # decomp_ll_limits = list(float) of [(min_lat, max_lat, min_lon, max_lon),... for each chunk]
+    #    these are based on the vertices of the cells in decomp_indices to ensure full coverage
+    decomp_indices   = []
+    decomp_ll_limits = []
+    landgen_io.set_chunk_cell_idx_ll_limits(mesh_nc_path, decomp_indices, decomp_ll_limits)
+
+	## todo: read in the grid file and set the values in out_grid_data - may not need this?
+	## todo: need to figure out how to write the large output file without storing the entire grid in memory  
+
+	try:
+		for mod in modules:
+			name = mod['name']
+			params = mod.get('params', {})
+			try:
+				module = importlib.import_module(f'landgen.{name}')
+				if hasattr(module, 'run'):
+					print(f"Running module: {name}")
+					run_list = [*params.values(), com_config_dict, out_grid_data, manager, grid_manager,\
+								 decomp_indices, decomp_ll_limits]
+					module.run(*run_list)
+				else:
+					print(f"Module {name} does not have a 'run' function.")
+			except ImportError as e:
+				print(f"Could not import module {name}: {e}")
+
+	except Exception as e:
+		print(f"ERROR in landgen: {e}")
+		raise
+
+	finally:
+		# free the shared memory
+		com_config_dict = None
+		out_grid_data = None
+		manager.shutdown()
+		grid_manager.shutdown()
 	return

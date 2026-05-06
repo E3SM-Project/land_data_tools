@@ -6,6 +6,7 @@ dependencies:
   - _python_abi3_support=1.0=hd8ed1ab_2
   - affine=2.4.0=pyhd8ed1ab_1
   - alsa-lib=1.2.15.3=hb03c661_0
+  - attr=2.5.2=hb03c661_1
   - attrs=26.1.0=pyhcf101f3_0
   - aws-c-auth=0.10.1=h2d2dd48_2
   - aws-c-cal=0.9.13=h2c9d079_1
@@ -82,6 +83,7 @@ dependencies:
   - libarrow-compute=23.0.1=h53684a4_9_cpu
   - libarrow-dataset=23.0.1=h635bf11_9_cpu
   - libarrow-substrait=23.0.1=hb4dd7c2_9_cpu
+  - libattr=2.5.2=hb03c661_1
   - libblas=3.11.0=6_h4a7cf45_openblas
   - libbrotlicommon=1.2.0=hb03c661_1
   - libbrotlidec=1.2.0=hb03c661_1
@@ -161,6 +163,7 @@ dependencies:
   - libxslt=1.1.43=h711ed8c_1
   - libzip=1.11.2=h6991a6a_0
   - libzlib=1.3.2=h25fd6f3_2
+  - lxml=6.1.0=py314hae3bed6_0
   - lz4-c=1.10.0=h5888daf_1
   - lzo=2.10=h280c20c_1002
   - matplotlib=3.10.8=py314hdafbbf9_0
@@ -193,6 +196,7 @@ dependencies:
   - python=3.14.4=habeac84_100_cp314
   - python-dateutil=2.9.0.post0=pyhe01879c_2
   - python-gil=3.14.4=h4df99d1_100
+  - python-pptx=1.0.2=pyhcf101f3_1
   - python_abi=3.14=8_cp314
   - qhull=2020.2=h434a139_5
   - qt6-main=6.11.0=pl5321h16c4a6b_4
@@ -209,6 +213,8 @@ dependencies:
   - sqlite=3.53.0=h04a0ce9_0
   - tk=8.6.13=noxft_h366c992_103
   - tornado=6.5.5=py314h5bd0f2a_0
+  - typing-extensions=4.15.0=h396c80c_0
+  - typing_extensions=4.15.0=pyhcf101f3_0
   - tzdata=2025c=hc9c84f9_1
   - unicodedata2=17.0.1=py314h5bd0f2a_0
   - uriparser=0.9.8=hac33072_0
@@ -222,6 +228,7 @@ dependencies:
   - xcb-util-wm=0.4.2=hb711507_0
   - xerces-c=3.3.0=hd9031aa_1
   - xkeyboard-config=2.47=hb03c661_0
+  - xlsxwriter=3.2.9=pyhd8ed1ab_0
   - xorg-libice=1.1.2=hb9d3cd8_0
   - xorg-libsm=1.2.6=he73a12e_0
   - xorg-libx11=1.8.13=he1eb515_0
@@ -267,7 +274,6 @@ dependencies:
       - ipywidgets==8.1.8
       - jedi==0.19.2
       - jupyterlab-widgets==3.0.16
-      - landgen==0.1.0
       - lazy-loader==0.5
       - markdown-it-py==4.0.0
       - matplotlib-inline==0.2.1
@@ -306,7 +312,6 @@ dependencies:
       - trame-common==1.1.3
       - trame-server==3.10.0
       - trame-vuetify==3.2.1
-      - typing-extensions==4.15.0
       - uraster==0.1.7
       - urllib3==2.6.3
       - vtk==9.6.1
@@ -314,4 +319,4 @@ dependencies:
       - widgetsnbextension==4.0.15
       - wslink==2.5.6
       - yarl==1.23.0
-prefix: /global/homes/e/esinha/.conda/envs/landgen_env
+prefix: /global/homes/a/avdivitt/.conda/envs/landgen_env
