@@ -10,7 +10,6 @@ from rasterio.transform import from_bounds
 import json
 import shapely.wkb
 from uraster.classes.uraster import uraster as URaster
-from pymodis import downmodis, modis_mosaic, modis_convert
 import glob
 import os
 import math
@@ -20,7 +19,7 @@ from osgeo import gdal
 
 #--------------------------------------------------------------------------
 def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits,
-                              chunk_size_degrees=10):
+                              chunk_size_degrees=10, out_dir=None):
     """
     Populate chunk_indices and chunk_ll_limits in-place from the domain NetCDF.
     Also write a companion .npz file mapping chunk lat-lon limits to cell indices.
@@ -84,14 +83,19 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
         key = f"{min_lat:.0f}_{max_lat:.0f}_{min_lon:.0f}_{max_lon:.0f}"
         index[key] = indices
 
-    # write companion file
-    out_path = Path(nc_path).with_suffix('.spatial_index.npz')
-    np.savez_compressed(out_path, **index)
-    
+    # write companion file to out_dir (if given) or alongside the mesh NC
+    npz_name = Path(nc_path).stem + '.spatial_index.npz'
+    npz_dir = Path(out_dir) if out_dir is not None else Path(nc_path).parent
+    out_path = npz_dir / npz_name
+    try:
+        np.savez_compressed(out_path, **index)
+        print(f"  set_decomp_cell_idx_ll_limits: wrote {len(index)} chunks to {out_path}")
+    except PermissionError:
+        print(f"  set_decomp_cell_idx_ll_limits: WARNING — could not write companion file to {out_path} (permission denied, skipping)")
+        out_path = None
+
     print(f"  set_decomp_cell_idx_ll_limits: built {len(decomp_indices)} chunks from {nc_path}")
     print(f"  set_decomp_cell_idx_ll_limits: chunks include {sum(len(t) for t in decomp_indices)} cells")
-    print(f"  set_decomp_cell_idx_ll_limits: check against total cells in {nc_path} to ensure all are included")
-    print(f"  set_decomp_cell_idx_ll_limits: wrote {len(index)} chunks to {out_path}")
 
     return out_path
 
@@ -354,6 +358,8 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
     # user must set up a .netrc file in their home directory (~/.netrc) with their credentials on one line, e.g.:
     # machine urs.earthdata.nasa.gov login <myusername> password <mypassword>
     # and set the file permissions to user read/write only (chmod 600 ~/.netrc) to protect their credentials
+
+    from pymodis import downmodis, modis_mosaic, modis_convert  # noqa: PLC0415
 
     dir_path = Path(dir_path)
     output_dir = dir_path   # GeoTIFFs are written to the same directory as the downloaded HDF files

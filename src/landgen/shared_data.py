@@ -8,6 +8,7 @@
 # the shared custom data structures are registered in main()
 
 import multiprocessing as mp
+from multiprocessing import Lock
 from multiprocessing.managers import BaseManager
 import numpy as np
 

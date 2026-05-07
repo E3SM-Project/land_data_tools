@@ -52,17 +52,17 @@ def main(config_path):
 
 	## todo: read in the grid file and set the remaining values in out_grid_data (lon, lat, area, etc.)
 
+	# these are lists of tuples with each tuple defining a chunk, and are paired in order
+	# decomp_indices: indices within each chunk for the landgen grid file variables
+	# decomp_ll_limits = list(float) of [(min_lat, max_lat, min_lon, max_lon),... for each chunk]
+	#    these are based on the vertices of the cells in decomp_indices to ensure full coverage
+	mesh_nc_path = Path(temp_dict['source_data_path']) / temp_dict['landgen_grid_path']
+	decomp_indices   = []
+	decomp_ll_limits = []
+	landgen_io.set_decomp_cell_idx_ll_limits(mesh_nc_path, decomp_indices, decomp_ll_limits,
+										   out_dir=temp_dict['out_path'])
 
-    # these are lists of tuples with each tuple defining a chunk, and are paired in order
-    # decomp_indices: indices within each chunk for the landgen grid file variables 
-    # decomp_ll_limits = list(float) of [(min_lat, max_lat, min_lon, max_lon),... for each chunk]
-    #    these are based on the vertices of the cells in decomp_indices to ensure full coverage
-    decomp_indices   = []
-    decomp_ll_limits = []
-    landgen_io.set_chunk_cell_idx_ll_limits(mesh_nc_path, decomp_indices, decomp_ll_limits)
-
-	## todo: read in the grid file and set the values in out_grid_data - may not need this?
-	## todo: need to figure out how to write the large output file without storing the entire grid in memory  
+	## todo: need to figure out how to write the large output file without storing the entire grid in memory
 
 	try:
 		for mod in modules:
