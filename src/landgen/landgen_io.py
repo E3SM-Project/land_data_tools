@@ -553,6 +553,7 @@ def read_luh2_harvest(year, harvest_path, harvest_name, variable_names=None):
               lat/lon coordinate arrays are included as 'lat' and 'lon' keys.
     """
     if variable_names is None:
+        from .harvest import LUH2_HARVEST_VARS  # noqa: PLC0415
         variable_names = LUH2_HARVEST_VARS
 
     ncfile = Path(harvest_path) / harvest_name

@@ -151,7 +151,7 @@ def _harvest_process_impl(year, grazing_names,
 ## this sets up the pool and calls the harvest_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, manager, grid_manager, lt_manager, decomp_indices, decomp_ll_limits):
+        com_config_dict, out_grid_data, manager, grid_manager, decomp_indices, decomp_ll_limits):
 
     print(f"Processing harvest module with parameters:")
     # todo: print the parameters here
@@ -204,7 +204,6 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # using data-specific locks, watch out for deadlocks.  
     man_lock  = manager.Lock()
     grid_lock = grid_manager.lock()
-    lt_lock   = lt_manager.lock()
 
     # Build data_chunks: one tuple per spatial chunk.
     # Use 5x5 degree boxes (1440 chunks) instead of 10x10 (360 chunks) to reduce

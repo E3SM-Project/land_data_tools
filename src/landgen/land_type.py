@@ -20,7 +20,7 @@ import pandas as pd
 ##### _process_single_year()
 def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, lc_rs_name, crop_path, urban_path,
                          lake_path, ice_path, wetland_path, harvest_path, harvest_name, grazing_path, grazing_names, assoc_path, com_config_dict, out_grid_data,
-                         manager, grid_manager, lt_manager, decomp_indices, decomp_ll_limits):
+                         manager, grid_manager, decomp_indices, decomp_ll_limits):
     """Process land type data for a single year."""
 
     # arguments
@@ -70,13 +70,13 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     # each module's run function calls the multiple processes because these modules need to be done sequentially
     landcover = importlib.import_module('landgen.landcover')
     lc_data = landcover.run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-                            com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager, lt_manager)
+                            com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager)
 
     # Process crop data - adjust lc crop area
     try:
-    crop = importlib.import_module('landgen.crop')
+        crop = importlib.import_module('landgen.crop')
         lc_data = crop.run(lt_year_data, year, prev_year, crop_path, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                           manager, grid_manager, lt_manager)
+                           manager, grid_manager)
     except ImportError:
         print(f"  Skipping crop module (not yet implemented)")
 
@@ -84,7 +84,7 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     try:
         urban = importlib.import_module('landgen.urban')
         lc_data = urban.run(lt_year_data, year, prev_year, urban_path, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                            manager, grid_manager, lt_manager)
+                            manager, grid_manager)
     except ImportError:
         print(f"  Skipping urban module (not yet implemented)")
 
@@ -92,7 +92,7 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     try:
         lake = importlib.import_module('landgen.lake')
         lc_data = lake.run(lt_year_data, year, prev_year, lake_path, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                           manager, grid_manager, lt_manager)
+                           manager, grid_manager)
     except ImportError:
         print(f"  Skipping lake module (not yet implemented)")
 
@@ -100,7 +100,7 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     try:
         ice = importlib.import_module('landgen.ice')
         lc_data = ice.run(lt_year_data, year, prev_year, ice_path, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                          manager, grid_manager, lt_manager)
+                          manager, grid_manager)
     except ImportError:
         print(f"  Skipping ice module (not yet implemented)")
 
@@ -108,7 +108,7 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     # (may not be needed as the main source is currently the modis cover data;
     #  can allow for this in the future)
     #wetland = importlib.import_module('wetland')
-    #lc_data = wetland.run(lt_year_data, year, prev_year, wetland_path, com_config_dict, out_grid_data, decomp_ll_limits, cell_ids, manager, grid_manager, lt_manager)
+    #lc_data = wetland.run(lt_year_data, year, prev_year, wetland_path, com_config_dict, out_grid_data, decomp_ll_limits, cell_ids, manager, grid_manager)
 
     #todo: update this with more efficient decomp and generalized reading and chunking
     # Process harvest/grazing data - adjust harvest/grazing area
@@ -119,8 +119,8 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     # Normalize cell
     try:
         normalize_cell = importlib.import_module('landgen.normalize_cell')
-        lc_data = normalize_cell.fill_land(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager, lt_manager)       # fill_land
-        lc_data = normalize_cell.reconcile_ocean(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager, lt_manager)  # reconcile_ocean
+        lc_data = normalize_cell.fill_land(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager)       # fill_land
+        lc_data = normalize_cell.reconcile_ocean(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager)  # reconcile_ocean
     except ImportError:
         print(f"  Skipping normalize_cell module (not yet implemented)")
 
@@ -128,14 +128,14 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     try:
         veg_assoc = importlib.import_module('landgen.veg_assoc')
         lc_data = veg_assoc.run(lt_year_data, year, prev_year, assoc_path, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                                manager, grid_manager, lt_manager)
+                                manager, grid_manager)
     except ImportError:
         print(f"  Skipping veg_assoc module (not yet implemented)")
 
     # Ensure consistency
     try:
         consistency = importlib.import_module('landgen.consistency')
-        lc_data = consistency.run(lt_year_data, year, out_grid_data, decomp_ll_limits, manager, grid_manager, lt_manager)
+        lc_data = consistency.run(lt_year_data, year, out_grid_data, decomp_ll_limits, manager, grid_manager)
     except ImportError:
         print(f"  Skipping consistency module (not yet implemented)")
 
@@ -200,17 +200,18 @@ def run(active, out_fname, lc_rs_path, lc_rs_name, crop_path, urban_path, lake_p
         print(f"  Processing year: {year}")
         _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, lc_rs_name, crop_path, urban_path,
                              lake_path, ice_path, wetland_path, harvest_path, harvest_name, grazing_path, grazing_names, assoc_path, com_config_dict, out_grid_data,
-                             manager, grid_manager, lt_manager, decomp_indices, decomp_ll_limits)
+                             manager, grid_manager, decomp_indices, decomp_ll_limits)
 
         # write this year's lt_year_data to a per-year NetCDF file
         cell_ids = out_grid_data.get_cell_id()
+        from landgen.harvest import LUH2_HARVEST_VARS  # noqa: PLC0415
         landgen_io.write_lt_year_data_to_netcdf(
             lt_year_data,
             cell_ids,
             year,
             out_path,
             out_fname,
-            landgen_io.LUH2_HARVEST_VARS,
+            LUH2_HARVEST_VARS,
             list(grazing_names.keys()),
         )
 

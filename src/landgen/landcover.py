@@ -116,7 +116,7 @@ def landcover_process(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_
 
 def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
                             com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                            manager, grid_manager, lt_manager):
+                            manager, grid_manager):
 
 
 
@@ -150,7 +150,6 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     # using data-specific locks, watch out for deadlocks.  
     man_lock  = manager.Lock()
     grid_lock = grid_manager.lock()
-    lt_lock   = lt_manager.lock()
 
 ## todo: figure out the data to pass here
 # each chunk is a tuple of the arguments for landcover_process, residing in a list
