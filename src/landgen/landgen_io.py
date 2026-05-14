@@ -678,10 +678,12 @@ def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
     chunk_data = data_2d[np.ix_(lat_idx, lon_idx)].astype(np.float32)
 
     # rasterio uses (west, south, east, north) bounds
-    west  = float(chunk_lon[0])  - abs(lon_step) / 2.0
-    east  = float(chunk_lon[-1]) + abs(lon_step) / 2.0
-    south = float(chunk_lat[0])  - abs(lat_step) / 2.0
-    north = float(chunk_lat[-1]) + abs(lat_step) / 2.0
+    # Use min/max rather than first/last element so this is correct for both
+    # south-to-north (e.g. some grids) and north-to-south (HYDE3.5, LUH2) lat arrays.
+    west  = float(chunk_lon.min()) - abs(lon_step) / 2.0
+    east  = float(chunk_lon.max()) + abs(lon_step) / 2.0
+    south = float(chunk_lat.min()) - abs(lat_step) / 2.0
+    north = float(chunk_lat.max()) + abs(lat_step) / 2.0
 
     n_rows, n_cols = chunk_data.shape
     transform = from_bounds(west, south, east, north, n_cols, n_rows)
