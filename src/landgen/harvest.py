@@ -27,6 +27,11 @@ LUH2_HARVEST_VARS = [
     'secnf_harv',   # wood harvest area from secondary non forest land
 ]
 
+# HEALPix 10km equal-area cell area in km².
+# All cells have identical area (confirmed from merged_land_cells.parquet: min=max=1.625086e8 m²).
+# Used to convert HYDE3.5 grazing data from km² to dimensionless fraction (0-1).
+HEALPIX_CELL_AREA_KM2 = 162.5086
+
 ########## define helper functions for harvest run() here
 
 ##### harvest_process()
@@ -129,6 +134,9 @@ def _harvest_process_impl(year, grazing_names,
         harvest_results.append((i, regridded))
 
     # --- regrid grazing variables ---
+    # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
+    # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
+    # area to convert to a dimensionless fraction (0-1).
     grazing_results = []
     for i, category in enumerate(grazing_names.keys()):
         regridded = landgen_io.regrid_to_landgen_grid(
@@ -140,6 +148,8 @@ def _harvest_process_impl(year, grazing_names,
             tmp_dir / category,
             category,
         )
+        regridded = regridded / HEALPIX_CELL_AREA_KM2  # km² → fraction
+        np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
         grazing_results.append((i, regridded))
 
     return row_indices, harvest_results, grazing_results
@@ -173,9 +183,12 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     grazing_data = landgen_io.read_hyde_grazing(year, grazing_path, grazing_names)
 
     # build a mapping from HEALPix cellid -> positional row index in lt_year_data arrays
-    # the row order matches the order of cells in global_mesh_df (sorted by cellid)
-    sorted_cellids = np.sort(global_mesh_df['cellid'].values)
-    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(sorted_cellids)}
+    # the row order matches the parquet row order — same order used in landgen.py
+    # (out_grid_data.cell_id) and land_type.py (lt_year_data allocation).
+    # DO NOT sort here: sorting would create a different ordering than the parquet row
+    # order, causing lt_year_data array positions to be mismatched with the cell_id
+    # coordinate written to the output NetCDF.
+    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(global_mesh_df['cellid'].values)}
 
     # number of available cpu cores (set by SBATCH during job submission)
     omp_threads_str = os.environ.get('OMP_NUM_THREADS')

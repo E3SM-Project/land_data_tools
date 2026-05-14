@@ -316,14 +316,14 @@ class LtData:
     def get_pct_urban(self):     return self.pct_urban
 
     # --- setter methods for proxy access via LtManager ---
-    def set_harvest_frac(self, cell_ids, i, values):
-        self.harvest_frac[cell_ids, i] = values
-    def set_harvest_mass(self, cell_ids, i, values):
-        self.harvest_mass[cell_ids, i] = values
-    def set_grazing_frac(self, cell_ids, i, values):
-        self.grazing_frac[cell_ids, i] = values
-    def set_pct_pft(self, cell_ids, i, values):
-        self.pct_pft[cell_ids, i] = values
+    def set_harvest_frac(self, row_indices, i, values):
+        self.harvest_frac[row_indices, i] = values
+    def set_harvest_mass(self, row_indices, i, values):
+        self.harvest_mass[row_indices, i] = values
+    def set_grazing_frac(self, row_indices, i, values):
+        self.grazing_frac[row_indices, i] = values
+    def set_pct_pft(self, row_indices, i, values):
+        self.pct_pft[row_indices, i] = values
 
 
 # ---------------------------------------------------------------------------
