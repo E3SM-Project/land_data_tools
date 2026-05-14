@@ -114,7 +114,7 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, lc_rs_path, l
     # Process harvest/grazing data - adjust harvest/grazing area
     harvest = importlib.import_module('landgen.harvest')
     lc_data = harvest.run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-                          com_config_dict, out_grid_data, manager, grid_manager)
+                          com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager)
 
     # Normalize cell
     try:

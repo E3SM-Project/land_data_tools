@@ -151,7 +151,7 @@ def _harvest_process_impl(year, grazing_names,
 ## this sets up the pool and calls the harvest_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, manager, grid_manager, decomp_indices, decomp_ll_limits):
+        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager):
 
     print(f"Processing harvest module with parameters:")
     # todo: print the parameters here
@@ -203,31 +203,19 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # get the manager locks for the shared data structures
     # using data-specific locks, watch out for deadlocks.  
     man_lock  = manager.Lock()
-    grid_lock = grid_manager.lock()
+    #grid_lock = grid_manager.lock()
 
-    # Build data_chunks: one tuple per spatial chunk.
-    # Use 5x5 degree boxes (1440 chunks) instead of 10x10 (360 chunks) to reduce
-    # per-chunk variance: tropical land chunks at 10° can take 500+s while polar
-    # chunks take 3s, creating severe load imbalance at the end of the job.
-    # Smaller chunks keep all workers busy until the very end.
 
-    from . import land_type as _lt
-    decomp_box_size_degrees = 5
-    chunk_ll_limits = _lt.calc_ll_limits(decomp_box_size_degrees)
-
+    # Build data_chunks from the pre-computed decomp_indices / decomp_ll_limits
+    # passed in from landgen.py via land_type.py.  These were produced by
+    # set_decomp_cell_idx_ll_limits(), which computes tight vertex bounding boxes
+    # per chunk — exactly the ll_limits that regrid_to_landgen_grid needs so the
+    # raster slice fully covers every polygon in the chunk.
     data_chunks = []
-    for ll in chunk_ll_limits:
-        min_lat, max_lat, min_lon, max_lon = ll
-        mask = (
-            (global_mesh_df['lat'] >= min_lat) & (global_mesh_df['lat'] < max_lat) &
-            (global_mesh_df['lon'] >= min_lon) & (global_mesh_df['lon'] < max_lon)
-        )
-        chunk_cell_ids = global_mesh_df.loc[mask, 'cellid'].values
-        if len(chunk_cell_ids) == 0:
-            continue  # skip ocean-only or empty chunks
-        data_chunks.append((
-            year, ll, chunk_cell_ids,
-        ))
+    for cell_ids, ll in zip(decomp_indices, decomp_ll_limits):
+        if len(cell_ids) == 0:
+            continue  # skip empty (ocean-only) chunks
+        data_chunks.append((year, ll, cell_ids))
 
     # Sort largest chunks first (most cells = slowest) so they are dispatched
     # immediately and don't create a long tail at the end of the job.

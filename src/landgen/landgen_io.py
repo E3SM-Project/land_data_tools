@@ -39,7 +39,7 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
                                  'lat', 'lon' (~ cell centres), 'xv', 'yv'
                                  (vertex coordinates, shape n_cells x n_vertices).
         chunk_indices (list):    Output — populated in-place.  Each element is a
-                                 1D tuple of row indices for the NC file
+                                 1D tuple of HEALPix cellid values (int64)
                                  identifying the cells in that chunk.
         chunk_ll_limits (list):  Output — populated in-place.  Each element is a
                                  (min_lat, max_lat, min_lon, max_lon) tuple of the
@@ -53,11 +53,12 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
 
     # read the full file once — this is a one-time setup call
     # note that lat and lon are approximate cell centers
-    ds  = xr.open_dataset(nc_path, decode_times=False)
-    lat = ds['lat'].values.astype(np.float64)   # (n_cells,)
-    lon = ds['lon'].values.astype(np.float64)   # (n_cells,)
-    xv  = ds['xv'].values.astype(np.float64)    # (n_cells, n_vertices)
-    yv  = ds['yv'].values.astype(np.float64)    # (n_cells, n_vertices)
+    ds      = xr.open_dataset(nc_path, decode_times=False)
+    lat     = ds['lat'].values.astype(np.float64)    # (n_cells,)
+    lon     = ds['lon'].values.astype(np.float64)    # (n_cells,)
+    xv      = ds['xv'].values.astype(np.float64)     # (n_cells, n_vertices)
+    yv      = ds['yv'].values.astype(np.float64)     # (n_cells, n_vertices)
+    cellids = ds['cellid'].values.astype(np.int64)   # (n_cells,) — HEALPix cell IDs
     ds.close()
 
     decomp_indices.clear()
@@ -73,13 +74,17 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
         # tight bounding box from actual vertex extents of the cells in this chunk
         xv_chunk = xv[indices]   # (n_chunk_cells, n_vertices)
         yv_chunk = yv[indices]
-        decomp_indices.append(tuple(indices.tolist()))
+
+        # Store HEALPix cellid values (not NC row indices) so callers can use them
+        # directly as cell identifiers.  Row indices are only needed here to index
+        # into xv/yv; they are kept in the companion .npz for load_mesh_nc().
+        decomp_indices.append(tuple(cellids[indices].tolist()))
         decomp_ll_limits.append((
             float(yv_chunk.min()), float(yv_chunk.max()),
             float(xv_chunk.min()), float(xv_chunk.max()),
         ))
 
-        # create dictionary for compainion file
+        # companion file stores NC row indices (used by load_mesh_nc via ds.isel())
         key = f"{min_lat:.0f}_{max_lat:.0f}_{min_lon:.0f}_{max_lon:.0f}"
         index[key] = indices
 
@@ -648,8 +653,14 @@ def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
     # add a 1-cell buffer on each side to avoid edge interpolation artefacts
     lat_step = float(lat[1] - lat[0])
     lon_step = float(lon[1] - lon[0])
-    lat_mask = (lat >= min_lat - abs(lat_step)) & (lat <= max_lat + abs(lat_step))
-    lon_mask = (lon >= min_lon - abs(lon_step)) & (lon <= max_lon + abs(lon_step))
+    # 1-cell buffer for floating-point safety — ensures the outermost raster
+    # pixels are not accidentally clipped by strict inequality comparisons.
+    # Chunk boundary artifacts are avoided upstream by using tight vertex
+    # bounding boxes (from set_decomp_cell_idx_ll_limits) as ll_limits, so a
+    # large buffer is not needed here.
+    buffer_cells = 1
+    lat_mask = (lat >= min_lat - buffer_cells * abs(lat_step)) & (lat <= max_lat + buffer_cells * abs(lat_step))
+    lon_mask = (lon >= min_lon - buffer_cells * abs(lon_step)) & (lon <= max_lon + buffer_cells * abs(lon_step))
 
     lat_idx = np.where(lat_mask)[0]
     lon_idx = np.where(lon_mask)[0]
