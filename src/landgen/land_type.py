@@ -14,7 +14,6 @@ from .shared_data import LtData
 import numpy as np
 from . import landgen_io
 from . import tools
-import pandas as pd
 
 logger = logging.getLogger('landgen')
 
