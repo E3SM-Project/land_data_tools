@@ -17,7 +17,6 @@ import matplotlib
 
 matplotlib.use('Agg')   # non-interactive backend — safe for HPC/batch
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from matplotlib.collections import PolyCollection
 
 try:
@@ -63,7 +62,7 @@ def _plot_one_var(ax, ds, varname, layer, year, mask, lon_xy, lat_xy,
 
     vmin, vmax = float(np.nanmin(values)), float(np.nanmax(values))
     norm = plt.Normalize(vmin=vmin, vmax=vmax)
-    cmap = cm.get_cmap(colormap)
+    cmap = plt.colormaps[colormap]
 
     # map extent
     if ll_limits is not None:
@@ -145,9 +144,9 @@ def plot_module_netcdf(file_path, out_path, year, varnames=None, layers=None,
     if plot_type not in ('scatter', 'rendered'):
         _log.error(f"plot_module_netcdf: plot_type must be 'scatter' or 'rendered', got '{plot_type}'")
         raise ValueError(f"plot_module_netcdf: plot_type must be 'scatter' or 'rendered', got '{plot_type}'")
-    if file_type not in ('png', 'pdf'):
-        _log.error(f"plot_module_netcdf: file_type must be 'png' or 'pdf', got '{file_type}'")
-        raise ValueError(f"plot_module_netcdf: file_type must be 'png' or 'pdf', got '{file_type}'")
+    if file_type != 'png':
+        _log.error(f"plot_module_netcdf: file_type must be 'png', got '{file_type}'")
+        raise ValueError(f"plot_module_netcdf: file_type must be 'png', got '{file_type}'")
 
     file_path = Path(file_path)
     if not file_path.exists():
@@ -212,35 +211,6 @@ def plot_module_netcdf(file_path, out_path, year, varnames=None, layers=None,
 
     lon_xy = lon_xy[mask]
     lat_xy = lat_xy[mask]
-
-    if file_type == 'pdf':
-        from matplotlib.backends.backend_pdf import PdfPages
-        out_file = out_path / f"{file_path.stem}_{year}.pdf"
-        page_count = 0
-        with PdfPages(out_file) as pdf:
-            for vname in varnames:
-                var_layers = _layers_for_var(vname, layers)
-                layer_indices, is_multilayer = _get_layer_indices(ds, vname, var_layers)
-                for layer_idx in layer_indices:
-                    if _HAS_CARTOPY:
-                        fig, ax = plt.subplots(figsize=(12, 6),
-                                               subplot_kw={'projection': ccrs.PlateCarree()})
-                    else:
-                        fig, ax = plt.subplots(figsize=(12, 6))
-                    try:
-                        mappable = _plot_one_var(ax, ds, vname, layer_idx, year, mask,
-                                                lon_xy, lat_xy, plot_type, colormap,
-                                                ll_limits, _log)
-                        fig.colorbar(mappable, ax=ax, label=vname)
-                        pdf.savefig(fig, bbox_inches='tight', dpi=150)
-                        page_count += 1
-                    except Exception as e:
-                        _log.warning(f"plot_module_netcdf: skipping '{vname}' layer {layer_idx}: {e}")
-                    finally:
-                        plt.close(fig)
-        ds.close()
-        _log.info(f"plot_module_netcdf: wrote {page_count}-page PDF to {out_file}")
-        return out_file
 
     out_files = []
     for vname in varnames:
@@ -311,7 +281,7 @@ def main(argv=None):
                         help="Layer selector: int, JSON list, or JSON dict by variable; default=None prints all layers")
     parser.add_argument('--plot-type', choices=['scatter', 'rendered'], default='scatter',
                         help="Plot type: 'scatter' for colored points, 'rendered' for cell polygons; default='scatter'")
-    parser.add_argument('--file-type', choices=['png', 'pdf'], default='png', help="Output file type; default='png'")
+    parser.add_argument('--file-type', choices=['png'], default='png', help="Output file type; only 'png' is supported")
     parser.add_argument('--colormap', default='viridis', help="Colormap for plots; default='viridis'")
     parser.add_argument('--ll-limits', nargs=4, type=float, metavar=('MIN_LAT', 'MAX_LAT', 'MIN_LON', 'MAX_LON'),
                         default=None, help="Latitude and longitude limits for plots; default=None uses full extent")

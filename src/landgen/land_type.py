@@ -37,6 +37,7 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
 ## todo: need to figure out how to use static data that has already been processed for the first year
 # maybe: if prev_year is not None and a submodule is static (submod_dyn==false) then use data from previous year file
 
+## todo change the order below, such that static data are processed first
 
     # Process landcover
     if submod_run['landcover']:

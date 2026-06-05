@@ -39,6 +39,7 @@
 PHYS_CPUS=$(( SLURM_CPUS_ON_NODE / 2 ))
 HALF_CPUS=$(( PHYS_CPUS / 2 ))
 P90_CPUS=$(( (PHYS_CPUS * 90 + 99) / 100 ))  # 90% of physical cores, rounded up
+HALF_LOG_CPUS=$(( (SLURM_CPUS_ON_NODE * 50 + 99) / 100 ))  # 50% of logical cores, rounded up
 P90_LOG_CPUS=$(( (SLURM_CPUS_ON_NODE * 90 + 99) / 100 ))  # 90% of logical cores, rounded up
 
 # set the srun cpus to use per task

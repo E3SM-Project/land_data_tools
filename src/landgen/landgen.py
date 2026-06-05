@@ -55,6 +55,7 @@ def main(config_path):
                 'end_year': config.get('end_year', 2015),
                 'source_data_path': config.get('source_data_path', ''),
                 'landgen_grid_path': config.get('landgen_grid_path', ''),
+                'ocean_shapefile_path': config.get('ocean_shapefile_path', ''),
                 'out_path': config.get('out_path', ''),
                 'decomp_box_size_degrees': config.get('decomp_box_size_degrees', 10),
                 'log_path': str(out_path / log_name),

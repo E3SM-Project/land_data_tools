@@ -18,6 +18,7 @@ from . import landcover_remote_sensing as lc_rs
 #from . import transitions # not created yet
 #from . import normalize_cell # not created yet
 import os
+import numpy as np
 
 logger = logging.getLogger('landgen')
 resource_logger = logging.getLogger('ClusterMonitor')
@@ -89,8 +90,6 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         lai_data = None
         elm_data = None
 
-        # todo: these data below will be read in based on ll_limits
-
         if lc_rs.use_lc_rs(year, lc_rs_name):
             # read modis cover data - use tmp_dir because the data are downloaded (not stored)
             # reading both the igbp cover data and the veg continuous fields data
@@ -101,6 +100,18 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
                     f"year={year} ll_limits={ll_limits} n_cells={len(cell_indices)}"
                 )
                 return lt_chunk_data
+
+            ### todo: this does not need to happen each year, see water_class in lc_rs module
+            #    also, this should be generalized to other lc_rs_name values
+            # Replace water_class raster with an ocean-only mask derived from
+            # shapefile overlap before any regridding is performed.
+            if 'water_class' in lc_rs_geotiffs:
+                lc_rs.set_ocean(
+                    lc_rs_name=lc_rs_name,
+                    water_class_tif=lc_rs_geotiffs['water_class'],
+                    source_data_path=com_config_dict['source_data_path'],
+                    ocean_shapefile_path=com_config_dict.get('ocean_shapefile_path', ''),
+                )
         else:
             # read and process previous year's landgen land type data and transitions to calculate this year's land cover distribution
             if prev_year is not None:
@@ -173,15 +184,14 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         # map lc_rs varnames -> lt_chunk_data fields
         # LC_Type1: IGBP land cover class per cell -> stored in pct_pft row 0 as a placeholder
         #           (full pft distribution is computed later in convert_lc_rs_to_elm)
-        # LW: MODIS land/water mask -> used to set pct_ocean (water=0, land=1 in MODIS LW)
         # VCF variables stored for later use in split_tree_grass_shrub
         if 'LC_Type1' in lc_rs_data:
             lt_chunk_data.pct_pft[:, 0] = lc_rs_data['LC_Type1']
-        if 'LW' in lc_rs_data:
-            # MODIS LW: 1=water, 2=land
-            # for now just set the pct_ocean to 1 for water cells and 0 for land cells
-            lw_mask = (lc_rs_data['LW'] == 1)
-            lt_chunk_data.pct_ocean[lw_mask] = lc_rs_data['LW'][lw_mask]
+        if 'water_class' in lc_rs_data:
+            # set_ocean() rewrites the water_class tiffs to a binary mask where
+            # 100=ocean and 0=non-ocean.
+            ocn_mask = (lc_rs_data['water_class'] == 100)
+            lt_chunk_data.pct_ocean[ocn_mask] = 100
         if 'Percent_Tree_Cover' in lc_rs_data:
             lt_chunk_data.pct_pft[:, 1] = lc_rs_data['Percent_Tree_Cover']
 
