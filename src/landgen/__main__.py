@@ -7,7 +7,7 @@ import multiprocessing as mp
 
 if __name__ == '__main__':
     # use spawn start method for multiprocessing to avoid issues with fork on some platforms
-    mp.set_start_method('spawn')
+    mp.set_start_method('forkserver')
     if len(sys.argv) != 2:
         print(f"Usage: python {Path(__file__).name} <path/config.json>")
         sys.exit(1)

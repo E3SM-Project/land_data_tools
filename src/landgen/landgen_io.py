@@ -1,15 +1,19 @@
 # landgen_io.py
 # Utility functions for reading harvest data from LUH2 and grazing data from HYDE3.5
 
+import logging
 import xarray as xr
 import numpy as np
 from pathlib import Path
 import pandas as pd
+
+logger = logging.getLogger('landgen')
 import rasterio
 from rasterio.transform import from_bounds
 import json
 import shapely.wkb
 from uraster.classes.uraster import uraster as URaster
+from pymodis import downmodis, convertmodis_gdal
 import glob
 import os
 import math
@@ -49,7 +53,7 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
     """
     nc_path = Path(nc_path_name)
     if not nc_path.exists():
-        raise FileNotFoundError(f"Mesh NetCDF file not found: {nc_path}")
+        raise FileNotFoundError(f"set_decomp_cell_idx_ll_limits: Mesh NetCDF file not found: {nc_path}")
 
     # read the full file once — this is a one-time setup call
     # note that lat and lon are approximate cell centers
@@ -122,11 +126,11 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
                                 created by set_chunk_cell_idx_ll_limits().
 
     Returns:
-        dict with keys 'cellid', 'xv', 'yv', 'lon', 'lat' (all np.ndarray).
+        dict with keys 'cellid', 'xv', 'yv', 'lon', 'lat', 'area' (all np.ndarray).
     """
     nc_path = Path(nc_path_name)
     if not nc_path.exists():
-        raise FileNotFoundError(f"Mesh NetCDF file not found: {nc_path}")
+        raise FileNotFoundError(f"load_mesh_nc: Mesh NetCDF file not found: {nc_path}")
 
     ds = xr.open_dataset(nc_path, decode_times=False)
 
@@ -139,13 +143,13 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
         idx_path = nc_path.with_suffix('.spatial_index.npz')
         if not idx_path.exists():
             raise FileNotFoundError(
-                f"Spatial index not found: {idx_path}. "
+                f"load_mesh_nc: Spatial index not found: {idx_path}. "
                 f"Run set_chunk_cell_idx_ll_limits('{nc_path}', chunk_indices, chunk_ll_limits) first."
             )
         indices_ll  = np.load(idx_path)[key]
         if indices_ll.size == 0:
             ds.close()
-            raise ValueError(f"No mesh cells found within ll_limits {ll_limits}.")
+            raise ValueError(f"load_mesh_nc: No mesh cells found within ll_limits {ll_limits}.")
         cell_dim = ds['lat'].dims[0]
         subset   = ds.isel({cell_dim: indices_ll})
     else:
@@ -156,10 +160,11 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
     yv     = subset['yv'].values.astype(np.float64)
     lon    = subset['lon'].values.astype(np.float64)
     lat    = subset['lat'].values.astype(np.float64)
+    area   = subset['area'].values.astype(np.float64)
     ds.close()
 
-    print(f"  load_mesh_nc: loaded {len(cellid)} cells from {nc_path}")
-    return {'cellid': cellid, 'xv': xv, 'yv': yv, 'lon': lon, 'lat': lat}
+    logger.info(f"load_mesh_nc: loaded {len(cellid)} cells from {nc_path}")
+    return {'cellid': cellid, 'xv': xv, 'yv': yv, 'lon': lon, 'lat': lat, 'area': area}
 
 
 
@@ -177,7 +182,7 @@ def calc_ll_limits(size_degrees):
     ll_limits = []
     if 90 % size_degrees != 0 or 180 % size_degrees != 0:
         raise ValueError(
-            f"size_degrees ({size_degrees}) must evenly divide "
+            f"calc_ll_limits: size_degrees ({size_degrees}) must evenly divide "
             f"both 90 (latitude half-range) and 180 (longitude half-range)."
         )
     lat = -90.0
@@ -240,7 +245,7 @@ def _get_year_idx(time_values, year, ncfile, time_units=None):
         actual_year  = time_as_years[year_idx]
         if abs(actual_year - year) > 1:
             raise ValueError(
-                f"Requested year {year} not found in {ncfile} "
+                f"_get_year_idx: Requested year {year} not found in {ncfile} "
                 f"(closest available: {actual_year:.0f})"
             )
         return year_idx
@@ -255,18 +260,14 @@ def _get_year_idx(time_values, year, ncfile, time_units=None):
 
     if abs(actual_year - year) > 1:
         raise ValueError(
-            f"Requested year {year} not found in {ncfile} "
+            f"_get_year_idx: Requested year {year} not found in {ncfile} "
             f"(closest available: {actual_year:.0f})"
         )
     return year_idx
 
 
-
-
-###todo: write general hdf read function:
-
 #--------------------------------------------------------------------------
-def get_modis_tile_idx(lon, lat):
+def _get_modis_tile_idx(lon, lat):
     """
     Calculate the MODIS tile indices (h, v) for a given longitude and latitude.
     The MODIS Sinusoidal grid divides the globe into 36 horizontal (h) and 18 vertical (v) tiles,
@@ -304,7 +305,7 @@ def get_modis_tile_idxs_ll(ll_limits):
     """
     min_lat, max_lat, min_lon, max_lon = ll_limits
     corners = [(min_lon, min_lat), (min_lon, max_lat), (max_lon, min_lat), (max_lon, max_lat)]
-    tile_idxs = [get_modis_tile_idx(lon, lat) for lon, lat in corners]
+    tile_idxs = [_get_modis_tile_idx(lon, lat) for lon, lat in corners]
     min_h = min(h for h, v in tile_idxs)
     max_h = max(h for h, v in tile_idxs)
     min_v = min(v for h, v in tile_idxs)
@@ -416,9 +417,9 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
     hdf_files = [str(f) for f in dir_path.glob('*.[hH][dD][fF]')]
     # Mosaic the tiles (combines tiles for each date)
     mosaic_output = str(dir_path / f'mosaic_{year}.hdf')
-    m = modis_mosaic.modis_mosaic(hdf_files, mosaic_output)
+    m = convertmodis_gdal.createMosaicGDAL(hdf_files, subset='( 1 )', outformat='HDF4Image')
     try:
-        m.run()
+        m.run(mosaic_output)
     except Exception as e:
         raise RuntimeError(
             f"read_modis_ll_to_geotiff: MODIS mosaic failed for product '{product}', year {year}: {e}"
@@ -426,22 +427,26 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
 
     # generate the sds input string for modis_convert() based on the variable_names list
 
-    # use modis_convert() to convert each desired variable to GeoTIFF with ll_limits as the bounding box
-    # Convert mosaicked HDF to GeoTIFF and select specific subdataset
+    # Convert mosaicked HDF to GeoTIFF, then clip to ll_limits bounding box.
+    # convertModisGDAL.subset is an SDS layer-selection mask ('0'/'1' per subdataset),
+    # not a bounding box — spatial clipping is applied afterwards via gdal.Warp.
 
     out = {}
     for var in variable_names:
-        # get the sds string for this variable
-        # Example: '( 0 1 0 0 )' to select the 2nd subdataset matching var
+        # get the sds selection string for this variable, e.g. '( 0 1 0 0 )'
         sds_str = get_sds_string(hdf_files[0], var)
-        output_tif = output_dir / f"{var}_{year}.tif"
-        converter = modis_convert.modis_convert(
-            mosaic_output,
-            str(output_dir),
-            output_filename=str(output_tif),
-            sds=sds_str,           # Example: '( 0 1 0 0 )' to select the 2nd subdataset matching var
-            subset=bbox,           # Applies spatial subsetting
-            epsg=4326              # Re-projects to WGS84
+        # convertModisGDAL writes <prefix>.tif
+        prefix = str(output_dir / f"{var}_{year}_full")
+        converter = convertmodis_gdal.convertModisGDAL(
+            hdfname=mosaic_output,
+            prefix=prefix,
+            subset=sds_str,   # SDS layer-selection mask, not a bounding box
+            res=None,
+            outformat='GTiff',
+            epsg=4326,
+            wkt=None,
+            resampl='NEAREST_NEIGHBOR',
+            vrt=False
         )
         try:
             converter.run()
@@ -449,6 +454,18 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
             raise RuntimeError(
                 f"read_modis_ll_to_geotiff: MODIS convert failed for variable '{var}', product '{product}', year {year}: {e}"
             ) from e
+
+        full_tif = output_dir / f"{var}_{year}_full.tif"
+        output_tif = output_dir / f"{var}_{year}.tif"
+        # clip to ll_limits bounding box: (min_lon, max_lon, min_lat, max_lat)
+        min_lat, max_lat, min_lon, max_lon = ll_limits
+        gdal.Warp(
+            str(output_tif),
+            str(full_tif),
+            outputBounds=(min_lon, min_lat, max_lon, max_lat),
+            outputBoundsSRS='EPSG:4326'
+        )
+        full_tif.unlink(missing_ok=True)   # remove unclipped intermediate
         out[var] = output_tif
 
     return out
@@ -491,7 +508,7 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
     if variable_names is None:
         # Raise an error
         # consider reading all variables in file instead of raising an error?
-        raise KeyError(f"Variable names must be provided in the json input file for {ncfile}. "
+        raise KeyError(f"read_netcdf_ll: Variable names must be provided in the json input file for {ncfile}. "
                        f"Available variables: {list(ds.data_vars)}")
 
     time_units = ds['time'].attrs.get('units', None)
@@ -499,7 +516,7 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
     #    as well as the case of no time units (assumed calendar years)
     # add cases to _get_year_idx as needed if other time unit patterns are encountered in source data
     year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
-    print(f"  read_netcdf: reading year {year} (time index {year_idx}) from {ncfile}")
+    logger.info(f"read_netcdf_ll: reading year {year} (time index {year_idx}) from {ncfile}")
 
     ####todo: this currently assumes that the variables lat/lon are ~cell centers
     # need to allow for other variable names to represent these coordinates 
@@ -522,7 +539,7 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
 
         if lat_idx.size == 0 or lon_idx.size == 0:
             raise ValueError(
-                f"No grid cells found within ll_limits {ll_limits} in {ncfile}. "
+                f"read_netcdf_ll: No grid cells found within ll_limits {ll_limits} in {ncfile}. "
                 f"lat range: [{lat_vals.min():.2f}, {lat_vals.max():.2f}], "
                 f"lon range: [{lon_vals.min():.2f}, {lon_vals.max():.2f}]"
             )
@@ -534,7 +551,7 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
     out = {'lat': ds['lat'].values, 'lon': ds['lon'].values}
     for v in variable_names:
         if v not in ds:
-            raise KeyError(f"Variable '{v}' not found in {ncfile}. "
+            raise KeyError(f"read_netcdf_ll: Variable '{v}' not found in {ncfile}. "
                            f"Available variables: {list(ds.data_vars)}")
         out[v] = ds[v].isel(time=year_idx).values  # shape: (lat, lon)
 
@@ -563,19 +580,19 @@ def read_luh2_harvest(year, harvest_path, harvest_name, variable_names=None):
 
     ncfile = Path(harvest_path) / harvest_name
     if not ncfile.exists():
-        raise FileNotFoundError(f"LUH2 harvest file not found: {ncfile}")
+        raise FileNotFoundError(f"read_luh2_harvest: LUH2 harvest file not found: {ncfile}")
 
     ds = xr.open_dataset(ncfile, decode_times=False)
 
     # LUH2 time axis is 'years since 850-01-01'; values are offsets from 850, not calendar years
     time_units = ds['time'].attrs.get('units', None)
     year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
-    print(f"  read_luh2_harvest: reading year {year} (time index {year_idx}) from {ncfile}")
+    logger.info(f"read_luh2_harvest: reading year {year} (time index {year_idx}) from {ncfile}")
 
     out = {'lat': ds['lat'].values, 'lon': ds['lon'].values}
     for v in variable_names:
         if v not in ds:
-            raise KeyError(f"Variable '{v}' not found in {ncfile}. "
+            raise KeyError(f"read_luh2_harvest: Variable '{v}' not found in {ncfile}. "
                            f"Available variables: {list(ds.data_vars)}")
         out[v] = ds[v].isel(time=year_idx).values  # shape: (lat, lon)
 
@@ -602,7 +619,7 @@ def read_hyde_grazing(year, grazing_path, grazing_names):
     """
     if not isinstance(grazing_names, dict):
         raise TypeError(
-            f"grazing_names must be a dict (e.g. {{'pasture': 'pasture.nc', "
+            f"read_hyde_grazing: grazing_names must be a dict (e.g. {{'pasture': 'pasture.nc', "
             f"'rangeland': 'rangeland.nc'}}), got {type(grazing_names).__name__}. "
             f"Please update config.json accordingly."
         )
@@ -614,14 +631,14 @@ def read_hyde_grazing(year, grazing_path, grazing_names):
     for category, filename in grazing_names.items():
         ncfile = grazing_path / filename
         if not ncfile.exists():
-            raise FileNotFoundError(f"HYDE3.5 grazing file not found: {ncfile}")
+            raise FileNotFoundError(f"read_hyde_grazing: HYDE3.5 grazing file not found: {ncfile}")
         # variable name is the file stem, e.g. 'pasture.nc' -> 'pasture'
         varname = Path(filename).stem
         ds = xr.open_dataset(ncfile, decode_times=False)
         time_units = ds['time'].attrs.get('units', None)
         year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
-        print(f"  read_hyde_grazing: reading '{varname}' year {year} "
-              f"(time index {year_idx}) from {ncfile}")
+        logger.info(f"read_hyde_grazing: reading '{varname}' year {year} "
+                    f"(time index {year_idx}) from {ncfile}")
         if first:
             out['lat'] = ds['lat'].values
             out['lon'] = ds['lon'].values
@@ -667,7 +684,7 @@ def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
 
     if lat_idx.size == 0 or lon_idx.size == 0:
         raise ValueError(
-            f"No source grid cells found within ll_limits {ll_limits}. "
+            f"write_latlon_to_geotiff: No source grid cells found within ll_limits {ll_limits}. "
             f"lat range: [{lat.min():.2f}, {lat.max():.2f}], "
             f"lon range: [{lon.min():.2f}, {lon.max():.2f}]"
         )
@@ -707,7 +724,65 @@ def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
         else:
             dst.write(chunk_data, 1)
 
-    print(f"  write_latlon_to_geotiff: wrote {n_rows}x{n_cols} chunk to {tmp_path}")
+    logger.info(f"write_latlon_to_geotiff: wrote {n_rows}x{n_cols} chunk to {tmp_path}")
+    return tmp_path
+
+
+#--------------------------------------------------------------------------
+def write_mesh_to_geojson(out_grid_data, tmp_path, cell_indices=None):
+    """
+    Write mesh cells from a GridData object to a GeoJSON file.
+
+    Builds polygon geometries directly from the vertex coordinate arrays
+    (lon_vtx, lat_vtx) stored in out_grid_data
+
+    Args:
+        out_grid_data (GridData): Populated grid geometry object whose arrays
+                                  have been filled (e.g. via load_mesh_nc).
+        tmp_path (str|Path):      Full path of the output GeoJSON file to write.
+                                  Parent directories are created if needed.
+        cell_indices (tuple|array-like|None): 0-based indices into the
+                                  out_grid_data arrays selecting which cells to
+                                  write.  Pass None to write all cells.
+
+    Returns:
+        Path: Path to the written GeoJSON file.
+    """
+    if cell_indices is None:
+        idx = np.arange(out_grid_data.num_cells, dtype=np.intp)
+    else:
+        idx = np.asarray(cell_indices, dtype=np.intp)
+
+    if idx.size == 0:
+        raise ValueError("write_mesh_to_geojson: cell_indices is empty — no cells to write")
+
+    cell_ids = out_grid_data.cell_id[idx]   # (n,)
+    lon_vtx  = out_grid_data.lon_vtx[idx]   # (n, n_vertices)
+    lat_vtx  = out_grid_data.lat_vtx[idx]   # (n, n_vertices)
+
+    features = []
+    for i in range(len(idx)):
+        # GeoJSON polygon ring: list of [lon, lat] pairs, closed (first == last)
+        ring = [[float(lon_vtx[i, v]), float(lat_vtx[i, v])]
+                for v in range(lon_vtx.shape[1])]
+        ring.append(ring[0])   # close the ring
+
+        features.append({
+            'type': 'Feature',
+            'geometry': {
+                'type': 'Polygon',
+                'coordinates': [ring],
+            },
+            'properties': {'cellid': int(cell_ids[i])},
+        })
+
+    geojson = {'type': 'FeatureCollection', 'features': features}
+    tmp_path = Path(tmp_path)
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path, 'w') as f:
+        json.dump(geojson, f)
+
+    logger.info(f"write_mesh_to_geojson: wrote {len(features)} cells to {tmp_path}")
     return tmp_path
 
 
@@ -738,7 +813,7 @@ def write_chunk_mesh_to_geojson(global_mesh_df, cell_ids, tmp_path):
 
     if chunk_df.empty:
         raise ValueError(
-            f"No mesh cells found for the provided cell_ids. "
+            f"write_chunk_mesh_to_geojson: No mesh cells found for the provided cell_ids. "
             f"First few cell_ids: {list(cell_ids[:5])}"
         )
 
@@ -758,7 +833,7 @@ def write_chunk_mesh_to_geojson(global_mesh_df, cell_ids, tmp_path):
     with open(tmp_path, 'w') as f:
         json.dump(geojson, f)
 
-    print(f"  write_chunk_mesh_to_geojson: wrote {len(features)} cells to {tmp_path}")
+    logger.info(f"write_chunk_mesh_to_geojson: wrote {len(features)} cells to {tmp_path}")
     return tmp_path
 
 
@@ -845,16 +920,16 @@ def regrid_to_landgen_grid(data_2d, src_lat, src_lon, cell_ids, ll_limits,
         out = np.array([result_map.get(int(cid), 0.0) for cid in cell_ids],
                        dtype=np.float64)
 
-        print(f"  regrid_to_landgen_grid: '{varname}' -> {len(out)} cells, "
-              f"non-zero: {np.count_nonzero(out)}")
+        logger.info(f"regrid_to_landgen_grid: '{varname}' -> {len(out)} cells, "
+                    f"non-zero: {np.count_nonzero(out)}")
         return out
 
     except ValueError as e:
         # raised by write_latlon_to_geotiff (no source cells in bounds) or
         # write_chunk_mesh_to_geojson (no mesh cells for cell_ids) — treat as
         # an empty chunk and return zeros rather than aborting the whole run
-        print(f"  regrid_to_landgen_grid: WARNING skipping empty '{varname}' chunk "
-              f"ll_limits={ll_limits}: {e}")
+        logger.warning(f"regrid_to_landgen_grid: skipping empty '{varname}' chunk "
+                       f"ll_limits={ll_limits}: {e}")
         return np.zeros(len(cell_ids), dtype=np.float64)
 
     except FileNotFoundError as e:
@@ -889,7 +964,240 @@ def regrid_to_landgen_grid(data_2d, src_lat, src_lon, cell_ids, ll_limits,
         except Exception:
             pass  # not empty or already gone - that's fine
 
+
 #--------------------------------------------------------------------------
+def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
+                   out_type='path', remap_method=3):
+    """
+    Regrid a single raster variable onto the landgen mesh cells for one chunk,
+    using uraster.  Inputs are already-written files (mesh GeoJSON + source
+    raster GeoTIFF), so no temp-file management is needed here.
+
+    Args:
+        mesh_file_path (str|Path): Full path to the chunk mesh GeoJSON written
+                               by write_mesh_to_geojson.
+        var_file_path (dict):  One-element dict {'<varname>': Path} pointing to
+                               the source raster GeoTIFF for this variable.
+        cell_indices (tuple):  0-based indices into out_grid_data arrays for
+                               the cells in this chunk.
+        out_grid_data (GridData): Grid geometry object; its cell_id array is used
+                               to map cellid values to output order when
+                               out_type='data'.
+        out_type (str):        'path' — return Path of the uraster output GeoJSON.
+                               'data' — return 1D np.ndarray of mean values
+                                        aligned to cell_indices order.
+        remap_method (int):    uraster iFlag_remap_method
+                               (1=nearest, 2=nearest, 3=weighted average).
+                               Default 3 is correct for area-fraction data.
+
+    Returns:
+        Path       if out_type='path': Path to the uraster output GeoJSON.
+        np.ndarray if out_type='data': 1D float64 array of length
+                   len(cell_indices), regridded values in the same order
+                   as cell_indices.
+    """
+    if out_type not in ('path', 'data'):
+        raise ValueError(f"regrid_to_mesh: out_type must be 'path' or 'data', got '{out_type}'")
+
+    mesh_path   = Path(mesh_file_path)
+    varname     = next(iter(var_file_path.keys()))
+    raster_path = Path(next(iter(var_file_path.values())))
+
+    if not mesh_path.exists():
+        raise FileNotFoundError(f"regrid_to_mesh: mesh file not found: {mesh_path}")
+    if not raster_path.exists():
+        raise FileNotFoundError(f"regrid_to_mesh: raster file not found: {raster_path}")
+
+    # output file sits next to the mesh file
+    out_path = mesh_path.parent / f"{varname}.geojson"
+
+    config = {
+        'sFilename_source_mesh':   str(mesh_path),
+        'aFilename_source_raster': [str(raster_path)],
+        'sFilename_target_mesh':   str(out_path),
+        'iFlag_remap_method':      remap_method,
+        'sField_unique_id':        'cellid',
+        'iFlag_global':            0,
+        'iFlag_polar':             0,
+    }
+    try:
+        processor = URaster(config)
+        processor.setup()
+        processor.run_remap()
+    except Exception as e:
+        raise RuntimeError(
+            f"regrid_to_mesh: uraster failed for '{varname}' "
+            f"(mesh={mesh_path}, raster={raster_path}): {e}"
+        ) from e
+
+    if not out_path.exists():
+        raise RuntimeError(
+            f"regrid_to_mesh: uraster completed but output not found: {out_path}")
+
+    if out_type == 'path':
+        return out_path
+
+    # out_type == 'data': read output GeoJSON and align values to cell_indices order
+    with open(out_path, 'r') as f:
+        geojson = json.load(f)
+
+    result_map = {}
+    for feature in geojson['features']:
+        props = feature['properties']
+        cid = int(props['cellid'])
+        val = props.get('mean', None)
+        result_map[cid] = float(val) if (val is not None and not np.isnan(val)) else 0.0
+
+    # use out_grid_data.cell_id to map chunk positions -> cellid values -> result values
+    chunk_cell_ids = out_grid_data.cell_id[np.asarray(cell_indices, dtype=np.intp)]
+    out = np.array([result_map.get(int(cid), 0.0) for cid in chunk_cell_ids],
+                   dtype=np.float64)
+
+    logger.info(f"regrid_to_mesh: '{varname}' -> {len(out)} cells, "
+                f"non-zero: {np.count_nonzero(out)}")
+    return out
+
+
+##### todo: need to set units an other attributres on the output variables here; currently just copying the raw values without metadata
+
+#--------------------------------------------------------------------------
+def write_module_netcdf(out_grid_data, module_data, out_path, file_name,
+                        year=None, timevars=None, varnames=None, ll_limits=None):
+    """
+    Write a NetCDF file containing grid geometry from out_grid_data plus
+    selected variables from one module data object (TopoData, LtData, etc.).
+
+    Grid variables written (from out_grid_data):
+        cell_id (coordinate), cell_area, landfrac, lon_xy, lat_xy,
+        lon_vtx, lat_vtx
+
+    Module variables written:
+        all non-None array attributes of module_data, or only those listed in
+        varnames if provided.  cell_idx is always skipped (internal bookkeeping).
+        Variables in timevars get a leading unlimited 'time' dimension so that
+        per-year files can be concatenated later with ncrcat or
+        xarray.open_mfdataset(..., concat_dim='time').
+
+    Spatial subsetting:
+        If ll_limits=(min_lat, max_lat, min_lon, max_lon) is given, only the
+        cells whose centre coordinates (out_grid_data.lat_xy / lon_xy) fall
+        within the bounding box are written.  Otherwise all cells are written.
+
+    Args:
+        out_grid_data (GridData):   Populated grid geometry object.
+        module_data (object):       Any per-cell data object (TopoData, LtData,
+                                    …) — NOT a BaseManager-derived class.
+        out_path (str|Path):        Directory in which to write the file.
+        file_name (str):            NetCDF filename (including extension).
+        year (int|None):            Calendar year for this record.  When given,
+                                    a 'time' coordinate with value=year is added
+                                    and all timevars receive a leading time dim.
+        timevars (list[str]|None):  Variable names that receive a leading
+                                    unlimited 'time' dimension.  Ignored when
+                                    year=None.  None → no variables get a time dim.
+        varnames (list[str]|None):  Variables to write from module_data.
+                                    None → write all non-None array attributes.
+        ll_limits (tuple|None):     (min_lat, max_lat, min_lon, max_lon) spatial
+                                    subset.  None → write all cells.
+
+    Returns:
+        Path: Path to the written NetCDF file.
+    """
+    out_path = Path(out_path)
+    out_path.mkdir(parents=True, exist_ok=True)
+    nc_path = out_path / file_name
+
+    n_cells  = out_grid_data.num_cells
+    time_set = set(timevars) if (timevars and year is not None) else set()
+
+    # --- determine which cells to write ---
+    if ll_limits is not None:
+        min_lat, max_lat, min_lon, max_lon = ll_limits
+        mask = (
+            (out_grid_data.lat_xy >= min_lat) & (out_grid_data.lat_xy <= max_lat) &
+            (out_grid_data.lon_xy >= min_lon) & (out_grid_data.lon_xy <= max_lon)
+        )
+        idx = np.where(mask)[0]
+    else:
+        idx = np.arange(n_cells, dtype=np.intp)
+
+    n_out = len(idx)
+    if n_out == 0:
+        raise ValueError(f"write_module_netcdf: no cells found within ll_limits {ll_limits}")
+
+    # --- collect variables to write from module_data ---
+    _skip = {'lock', 'cell_idx'}
+    if varnames is None:
+        varnames_to_write = [
+            k for k, v in vars(module_data).items()
+            if k not in _skip and isinstance(v, np.ndarray)
+        ]
+    else:
+        varnames_to_write = list(varnames)
+
+    # --- build xarray Dataset ---
+    cell_dim = 'cell'
+    vtx_dim  = 'vertex'
+    time_dim = 'time'
+
+    # time coordinate (size-1 so the unlimited dim exists for concatenation)
+    coords = {
+        'cell_id': xr.DataArray(out_grid_data.cell_id[idx], dims=[cell_dim],
+                                attrs={'long_name': 'cell identifier'}),
+    }
+    if year is not None:
+        coords['time'] = xr.DataArray(
+            np.array([year], dtype=np.int32), dims=[time_dim],
+            attrs={'long_name': 'year', 'units': 'calendar year'}
+        )
+
+    data_vars = {
+        'cell_area': xr.DataArray(out_grid_data.cell_area[idx], dims=[cell_dim],
+                                  attrs={'long_name': 'cell area'}),
+        'landfrac':  xr.DataArray(out_grid_data.landfrac[idx],  dims=[cell_dim],
+                                  attrs={'long_name': 'land fraction'}),
+        'lon_xy':    xr.DataArray(out_grid_data.lon_xy[idx],    dims=[cell_dim],
+                                  attrs={'long_name': 'cell-centre longitude', 'units': 'degrees_east'}),
+        'lat_xy':    xr.DataArray(out_grid_data.lat_xy[idx],    dims=[cell_dim],
+                                  attrs={'long_name': 'cell-centre latitude',  'units': 'degrees_north'}),
+        'lon_vtx':   xr.DataArray(out_grid_data.lon_vtx[idx],  dims=[cell_dim, vtx_dim],
+                                  attrs={'long_name': 'vertex longitudes', 'units': 'degrees_east'}),
+        'lat_vtx':   xr.DataArray(out_grid_data.lat_vtx[idx],  dims=[cell_dim, vtx_dim],
+                                  attrs={'long_name': 'vertex latitudes',  'units': 'degrees_north'}),
+    }
+
+    # add module variables
+    for name in varnames_to_write:
+        val = getattr(module_data, name, None)
+        if val is None or not isinstance(val, np.ndarray):
+            continue
+        arr = val[idx] if val.shape[0] == n_cells else val
+
+        # build spatial dimension names (no time prefix yet)
+        if arr.ndim == 1:
+            dims = [cell_dim]
+        elif arr.ndim == 2:
+            dims = [cell_dim, f'{name}_dim1']
+        elif arr.ndim == 3:
+            dims = [cell_dim, f'{name}_dim1', f'{name}_dim2']
+        else:
+            dims = [cell_dim] + [f'{name}_dim{i}' for i in range(1, arr.ndim)]
+
+        if name in time_set:
+            # prepend unlimited time dim with a size-1 axis
+            arr  = arr[np.newaxis, ...]   # (1, cell, ...)
+            dims = [time_dim] + dims
+        data_vars[name] = xr.DataArray(arr, dims=dims)
+
+    ds = xr.Dataset(data_vars=data_vars, coords=coords)
+    # declare 'time' as the unlimited dimension so ncrcat / concat works
+    encoding = {time_dim: {'unlimited': True}} if year is not None else {}
+    ds.to_netcdf(nc_path, unlimited_dims=[time_dim] if year is not None else [])
+
+    logger.info(f"write_module_netcdf: wrote {n_out} cells, "
+                f"{len(varnames_to_write)} module vars to {nc_path}"
+                + (f" (year {year}, {len(time_set)} timevars)" if year is not None else ""))
+    return nc_path
 
 
 #--------------------------------------------------------------------------

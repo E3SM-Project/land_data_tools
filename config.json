@@ -17,6 +17,26 @@
       "name": "land_type",
       "params": {
         "active": true,
+        "submod_run": {
+          "landcover": true,
+          "crop": false,
+          "urban": false,
+          "lake": false,
+          "ice": false,
+          "wetland": false,
+          "harvest": false,
+          "veg_assoc": false
+        },
+        "submod_dyn": {
+          "landcover": true,
+          "crop": true,
+          "urban": false,
+          "lake": false,
+          "ice": false,
+          "wetland": false,
+          "harvest": true,
+          "veg_assoc": false
+        },
         "out_fname": "landgen_land_type.nc",
         "lc_rs_path": "/global/cfs/cdirs/e3sm/landgen/rawdata/modis",
         "lc_rs_name": "modis",
@@ -32,7 +52,7 @@
           "pasture": "pasture.nc",
           "rangeland": "rangeland.nc"
         },
-        "assoc_path": ""
+        "veg_assoc_path": ""
       }
     },
     {

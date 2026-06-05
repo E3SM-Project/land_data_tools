@@ -6,6 +6,7 @@
 # run() function is the main entry point for this module, and will be called by process_single_year in land_type.py
 
 import multiprocessing as mp
+import logging
 from pathlib import Path
 from . import shared_data
 from . import landgen_io
@@ -15,6 +16,8 @@ import numpy as np
 import os
 import traceback
 import time
+
+logger = logging.getLogger('landgen')
 
 ########## define some module-specific constants here
 

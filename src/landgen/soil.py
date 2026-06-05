@@ -7,7 +7,10 @@
 
 import multiprocessing as mp
 import importlib
+import logging
 from pathlib import Path
+
+logger = logging.getLogger('landgen')
 
 
 ########## define helper functions for land_type run() here
@@ -32,9 +35,9 @@ from pathlib import Path
 
 ## output
 
-def run(active, out_fname, com_config_dict, out_grid_data, manager, grid_manager, decomp_indices, decomp_ll_limits):
+def run(active, out_fname, com_config_dict, out_grid_data, manager, decomp_indices, decomp_ll_limits):
     if active is False:
-        print(f"Skipping soil module")
+        logger.info("Skipping soil module")
         return
 
     # extract common parameters from shared config dict
@@ -46,7 +49,7 @@ def run(active, out_fname, com_config_dict, out_grid_data, manager, grid_manager
     # landfrac is stored in out_grid_data (set by topography module)
     landfrac          = out_grid_data.get_landfrac()
 
-    print(f"Processing soil module with parameters:")
+    logger.info("Processing soil module")
     # todo: print the parameters here
 
     # processing code for soil
