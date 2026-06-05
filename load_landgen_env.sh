@@ -12,8 +12,6 @@ else
     conda env create -f landgen_env.yml
 fi
 
-#conda env update -n landgen_env -f landgen_env.yml
-
 # activate the landgen_env conda environment
 conda activate landgen_env
 
@@ -26,8 +24,12 @@ pip install -e .
 # install a new python package
 #conda install <package_name>
 
+# remove a python package
+#conda remove <package_name>
+
 # to update the .yml file with new packages added to the environment
-#conda env export -n landgen_env > landgen_env.yml
+# (landgen is removed automatically since it is not on PyPI and is installed locally via pip install -e .)
+#conda env export -n landgen_env | grep -v "landgen==" > landgen_env.yml
 
 # to update the enviroment
 #conda env update -n landgen_env -f landgen_env.yml

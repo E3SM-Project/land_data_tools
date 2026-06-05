@@ -13,10 +13,11 @@ from rasterio.transform import from_bounds
 import json
 import shapely.wkb
 from uraster.classes.uraster import uraster as URaster
-from pymodis import downmodis, convertmodis_gdal
+import earthaccess
 import glob
 import os
 import math
+import re
 from pyproj import Proj
 from osgeo import gdal
 
@@ -50,6 +51,8 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
                                  tight vertex bounding box for that chunk's cells.
                                  Matched by position to chunk_indices.
         chunk_size_degrees (int): Size of the decomposition boxes in degrees.
+        out_dir (str|Path|None): Directory to write the companion .spatial_index.npz file.
+                                 If None, the file is written alongside nc_path_name.
     """
     nc_path = Path(nc_path_name)
     if not nc_path.exists():
@@ -92,19 +95,18 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
         key = f"{min_lat:.0f}_{max_lat:.0f}_{min_lon:.0f}_{max_lon:.0f}"
         index[key] = indices
 
-    # write companion file to out_dir (if given) or alongside the mesh NC
-    npz_name = Path(nc_path).stem + '.spatial_index.npz'
-    npz_dir = Path(out_dir) if out_dir is not None else Path(nc_path).parent
-    out_path = npz_dir / npz_name
-    try:
-        np.savez_compressed(out_path, **index)
-        print(f"  set_decomp_cell_idx_ll_limits: wrote {len(index)} chunks to {out_path}")
-    except PermissionError:
-        print(f"  set_decomp_cell_idx_ll_limits: WARNING — could not write companion file to {out_path} (permission denied, skipping)")
-        out_path = None
-
-    print(f"  set_decomp_cell_idx_ll_limits: built {len(decomp_indices)} chunks from {nc_path}")
-    print(f"  set_decomp_cell_idx_ll_limits: chunks include {sum(len(t) for t in decomp_indices)} cells")
+    # write companion file
+    index_name = Path(nc_path).stem + '.spatial_index.npz'
+    if out_dir is not None:
+        out_path = Path(out_dir) / index_name
+    else:
+        out_path = Path(nc_path).parent / index_name
+    np.savez_compressed(out_path, **index)
+    
+    logger.info(f"set_decomp_cell_idx_ll_limits: built {len(decomp_indices)} chunks from {nc_path}")
+    logger.info(f"set_decomp_cell_idx_ll_limits: chunks include {sum(len(t) for t in decomp_indices)} cells")
+    logger.info(f"set_decomp_cell_idx_ll_limits: check against total cells in {nc_path} to ensure all are included")
+    logger.info(f"set_decomp_cell_idx_ll_limits: wrote {len(index)} chunks to {out_path}")
 
     return out_path
 
@@ -117,13 +119,13 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
         nc_path_name (str|Path):      Path (and name) to the domain NetCDF file.
         indices (tuple|None): 1D tuple of NC indices to load,
                                    as returned in chunk_indices by
-                                   set_chunk_cell_idx_ll_limits().  If None,
+                                   set_decomp_cell_idx_ll_limits().  If None,
                                    check for ll_limits.
         ll_limits (tuple|None): (min_lat, max_lat, min_lon, max_lon) tuple
                                 to select cells by mapping file.  If also None,
                                 no lat/lon filtering is applied. This option
                                 uses the companion .npz spatial mapping file
-                                created by set_chunk_cell_idx_ll_limits().
+                                created by set_decomp_cell_idx_ll_limits().
 
     Returns:
         dict with keys 'cellid', 'xv', 'yv', 'lon', 'lat', 'area' (all np.ndarray).
@@ -144,7 +146,7 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
         if not idx_path.exists():
             raise FileNotFoundError(
                 f"load_mesh_nc: Spatial index not found: {idx_path}. "
-                f"Run set_chunk_cell_idx_ll_limits('{nc_path}', chunk_indices, chunk_ll_limits) first."
+                f"Run set_decomp_cell_idx_ll_limits('{nc_path}', decomp_indices, decomp_ll_limits, chunk_size_degrees) first."
             )
         indices_ll  = np.load(idx_path)[key]
         if indices_ll.size == 0:
@@ -303,7 +305,28 @@ def get_modis_tile_idxs_ll(ll_limits):
     Returns:
         a cvs string of indices in modis name format: 'h##v##, ...' for the tiles that intersect the bounding box.
     """
-    min_lat, max_lat, min_lon, max_lon = ll_limits
+    if ll_limits is None or len(ll_limits) != 4:
+        raise ValueError(
+            f"get_modis_tile_idxs_ll: ll_limits must be a 4-element (min_lat, max_lat, min_lon, max_lon), got {ll_limits}"
+        )
+
+    min_lat, max_lat, min_lon, max_lon = [float(x) for x in ll_limits]
+    if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+        raise ValueError(
+            f"get_modis_tile_idxs_ll: invalid latitude bounds {ll_limits}. "
+            "Expected (min_lat, max_lat, min_lon, max_lon) with lat in [-90, 90]."
+        )
+    if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
+        raise ValueError(
+            f"get_modis_tile_idxs_ll: invalid longitude bounds {ll_limits}. "
+            "Expected (min_lat, max_lat, min_lon, max_lon) with lon in [-180, 180]."
+        )
+    if min_lat > max_lat or min_lon > max_lon:
+        raise ValueError(
+            f"get_modis_tile_idxs_ll: non-monotonic bounds {ll_limits}. "
+            "Expected min <= max for both lat and lon."
+        )
+
     corners = [(min_lon, min_lat), (min_lon, max_lat), (max_lon, min_lat), (max_lon, max_lat)]
     tile_idxs = [_get_modis_tile_idx(lon, lat) for lon, lat in corners]
     min_h = min(h for h, v in tile_idxs)
@@ -311,30 +334,25 @@ def get_modis_tile_idxs_ll(ll_limits):
     min_v = min(v for h, v in tile_idxs)
     max_v = max(v for h, v in tile_idxs)
     tile_idxs = [(h, v) for h in range(min_h, max_h + 1) for v in range(min_v, max_v + 1)]
-    tile_strs = [f"h{h:02d}v{v:02d}" for h, v in set(tile_idxs)]
+    tile_strs = sorted(f"h{h:02d}v{v:02d}" for h, v in set(tile_idxs))
     return ", ".join(tile_strs)
 
+
 #--------------------------------------------------------------------------
-def get_sds_string(hdf_path_name, data_name):
-    """
-    Scans HDF subdatasets and returns a pyModis SDS string.
-    Example: '( 0 1 0 0 )' if the 2nd subdataset matches.
-    """
-    # Open the main HDF file
-    ds = gdal.Open(hdf_path_name)
-    # GetSubDatasets returns a list of (name, description) tuples
-    subdatasets = ds.GetSubDatasets()
-    
-    sds_bits = []
-    for sds_name, description in subdatasets:
-        # Check if the target name (e.g., 'LC_Type1') is in the description
-        if data_name in description:
-            sds_bits.append("1")
-        else:
-            sds_bits.append("0")
-            
-    # Format as '( 0 1 0 ... )' as required by modis_convert
-    return f"( {' '.join(sds_bits)} )"
+def _granule_hv_tag(granule):
+    """Extract MODIS h##v## tile tag from an earthaccess granule-like object."""
+    texts = [str(granule)]
+    try:
+        links = granule.data_links() if hasattr(granule, 'data_links') else []
+        texts.extend([str(x) for x in links])
+    except Exception:
+        pass
+    for txt in texts:
+        m = re.search(r'h\d{2}v\d{2}', txt, flags=re.IGNORECASE)
+        if m:
+            return m.group(0).lower()
+    return None
+
 
 #--------------------------------------------------------------------------
 def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_limits=None):
@@ -370,102 +388,198 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
     dir_path = Path(dir_path)
     output_dir = dir_path   # GeoTIFFs are written to the same directory as the downloaded HDF files
 
-    # bbox for modis_convert spatial subsetting: (min_lon, max_lon, min_lat, max_lat)
-    # None means no spatial subsetting (full tile extent)
+    # Validate and unpack ll_limits as (min_lat, max_lat, min_lon, max_lon).
+    # Earthaccess uses a different ordering for bounding_box (lon, lat, lon, lat).
     if ll_limits is not None:
         min_lat, max_lat, min_lon, max_lon = ll_limits
-        bbox = (min_lon, max_lon, min_lat, max_lat)
+        if not (-90.0 <= float(min_lat) <= 90.0 and -90.0 <= float(max_lat) <= 90.0):
+            raise ValueError(
+                f"read_modis_ll_to_geotiff: invalid latitude bounds in ll_limits {ll_limits}. "
+                "Expected (min_lat, max_lat, min_lon, max_lon)."
+            )
+        if not (-180.0 <= float(min_lon) <= 180.0 and -180.0 <= float(max_lon) <= 180.0):
+            raise ValueError(
+                f"read_modis_ll_to_geotiff: invalid longitude bounds in ll_limits {ll_limits}. "
+                "Expected (min_lat, max_lat, min_lon, max_lon)."
+            )
+        if float(min_lat) > float(max_lat) or float(min_lon) > float(max_lon):
+            raise ValueError(
+                f"read_modis_ll_to_geotiff: non-monotonic ll_limits {ll_limits}. "
+                "Expected min <= max for both lat and lon."
+            )
     else:
-        bbox = None
+        min_lat = max_lat = min_lon = max_lon = None
 
     # latest_date and earliest_date are in 'YYYY-MM-DD' format
     latest_date = f"{year}-12-31"
     earliest_date = f"{year}-01-01"
 
-    # identify the tile files based on ll_limits and create a string of modis indices for downmodis()
-    if ll_limits is not None:
-        tiles_str = get_modis_tile_idxs_ll(ll_limits)
+    # Parse product short name and version from 'MCD12Q1.061' -> ('MCD12Q1', '061')
+    product_parts = product.split('.')
+    short_name = product_parts[0]
+    version = product_parts[1] if len(product_parts) > 1 else '061'
 
-        # download a subset of the tiles with downmodis()
-        downloader = downmodis.downmodis(
-            destinationFolder=dir_path,
-            tiles=tiles_str,
-            product=product,
-            today=latest_date,
-            enddate=earliest_date
-        )
-    else:
-        # download all tiles for the year with downmodis()
-        downloader = downmodis.downmodis(
-            destinationFolder=dir_path,
-            product=product,
-            today=latest_date,
-            enddate=earliest_date
-        )
+    # Download HDF granules via NASA Earthdata Cloud (earthaccess).
+    # The old LP DAAC HTTPS server (e4ftl01.cr.usgs.gov) decommissioned MODIS
+    # directories in 2024; earthaccess is the current NASA-recommended approach.
+    # Credentials are read from ~/.netrc (machine urs.earthdata.nasa.gov).
+    logger.info(
+        f"read_modis_ll_to_geotiff: searching Earthdata for {product}  year={year}  "
+        f"ll_limits(min_lat,max_lat,min_lon,max_lon)={ll_limits}"
+    )
 
-    # Run download
     try:
-        downloader.downloads()
+        earthaccess.login(strategy='netrc')
+    except Exception as e:
+        raise RuntimeError(
+            f"read_modis_ll_to_geotiff: Earthdata login failed. "
+            f"Ensure ~/.netrc contains credentials for urs.earthdata.nasa.gov: {e}"
+        ) from e
+
+    search_kwargs = {
+        'short_name': short_name,
+        'version': version,
+        'temporal': (earliest_date, latest_date),
+    }
+    if ll_limits is not None:
+        # earthaccess bounding_box: (min_lon, min_lat, max_lon, max_lat)
+        # Round to 6 decimal places to avoid scientific notation (e.g. 3.68e-14)
+        # which the CMR API rejects as an invalid bounding_box value.
+        search_kwargs['bounding_box'] = (
+            round(float(min_lon), 6),
+            round(float(min_lat), 6),
+            round(float(max_lon), 6),
+            round(float(max_lat), 6),
+        )
+        logger.info(
+            "read_modis_ll_to_geotiff: Earthaccess bounding_box(min_lon,min_lat,max_lon,max_lat)="
+            f"{search_kwargs['bounding_box']}"
+        )
+
+    granules = earthaccess.search_data(**search_kwargs)
+
+    # CMR bbox filtering can return zero granules for very small boxes even when
+    # intersecting MODIS tiles exist. Retry by tile tags as a robust fallback.
+    if not granules and ll_limits is not None:
+        target_tiles = {
+            t.strip().lower()
+            for t in get_modis_tile_idxs_ll(ll_limits).split(',')
+            if t.strip()
+        }
+        logger.warning(
+            "read_modis_ll_to_geotiff: no granules from bbox search; retrying tile-filtered search "
+            f"for tiles={sorted(target_tiles)}, {product}, "
+            f"bounding_box(min_lon,min_lat,max_lon,max_lat)={search_kwargs['bounding_box']}"
+        )
+        broad_granules = earthaccess.search_data(
+            short_name=short_name,
+            version=version,
+            temporal=(earliest_date, latest_date),
+        )
+        granules = [
+            g for g in broad_granules
+            if (_granule_hv_tag(g) in target_tiles)
+        ]
+        logger.info(
+            f"read_modis_ll_to_geotiff: tile-filtered search found, {product}, "
+            f"{len(granules)} granule(s) from {len(broad_granules)} broad candidates"
+            f"bounding_box(min_lon,min_lat,max_lon,max_lat)={search_kwargs['bounding_box']}"
+        )
+
+    if not granules:
+        logger.warning(
+            f"read_modis_ll_to_geotiff: no granules found for {product} "
+            f"temporal={earliest_date}..{latest_date}  bounding_box={search_kwargs.get('bounding_box')}  "
+            f"ll_limits={ll_limits}; skipping this chunk for {product}"
+        )
+        return {}
+    logger.info(f"read_modis_ll_to_geotiff: found {len(granules)} granules for {product}; downloading to {dir_path}")
+
+    try:
+        downloaded = earthaccess.download(granules, local_path=str(dir_path))
     except Exception as e:
         raise RuntimeError(
             f"read_modis_ll_to_geotiff: MODIS download failed for product '{product}', year {year}: {e}"
         ) from e
 
-    # use modis_mosaic() to mosaic the tiles together if more than one file is needed to cover the ll_limits
-    os.makedirs(dir_path, exist_ok=True)
-    # list of strings of all HDF files downloaded
-    hdf_files = [str(f) for f in dir_path.glob('*.[hH][dD][fF]')]
-    # Mosaic the tiles (combines tiles for each date)
-    mosaic_output = str(dir_path / f'mosaic_{year}.hdf')
-    m = convertmodis_gdal.createMosaicGDAL(hdf_files, subset='( 1 )', outformat='HDF4Image')
-    try:
-        m.run(mosaic_output)
-    except Exception as e:
+    # Collect downloaded HDF files for this specific product/version only.
+    # The same temp directory is reused across product calls, so we must not
+    # mix, for example, MCD12Q1 tiles into a MOD44B read.
+    hdf_files = []
+    for f in sorted(dir_path.glob('*.[hH][dD][fF]')):
+        f_name_upper = f.name.upper()
+        if not f_name_upper.startswith(f"{short_name.upper()}."):
+            continue
+        if len(product_parts) > 1 and f".{version.upper()}." not in f_name_upper:
+            continue
+        hdf_files.append(str(f))
+    if not hdf_files:
         raise RuntimeError(
-            f"read_modis_ll_to_geotiff: MODIS mosaic failed for product '{product}', year {year}: {e}"
-        ) from e
+            f"read_modis_ll_to_geotiff: no HDF files for {product} found in {dir_path} after download"
+        )
+    logger.info(
+        f"read_modis_ll_to_geotiff: {len(hdf_files)} HDF tile(s) for {product} to process"
+    )
 
-    # generate the sds input string for modis_convert() based on the variable_names list
-
-    # Convert mosaicked HDF to GeoTIFF, then clip to ll_limits bounding box.
-    # convertModisGDAL.subset is an SDS layer-selection mask ('0'/'1' per subdataset),
-    # not a bounding box — spatial clipping is applied afterwards via gdal.Warp.
+    # Build per-variable GeoTIFFs using GDAL directly
+    # gdal.BuildVRT mosaics the per-tile subdatasets; gdal.Warp reprojects and
+    # clips to ll_limits.  This avoids pymodis's requirement for .hdf.xml sidecars.
 
     out = {}
     for var in variable_names:
-        # get the sds selection string for this variable, e.g. '( 0 1 0 0 )'
-        sds_str = get_sds_string(hdf_files[0], var)
-        # convertModisGDAL writes <prefix>.tif
-        prefix = str(output_dir / f"{var}_{year}_full")
-        converter = convertmodis_gdal.convertModisGDAL(
-            hdfname=mosaic_output,
-            prefix=prefix,
-            subset=sds_str,   # SDS layer-selection mask, not a bounding box
-            res=None,
-            outformat='GTiff',
-            epsg=4326,
-            wkt=None,
-            resampl='NEAREST_NEIGHBOR',
-            vrt=False
-        )
-        try:
-            converter.run()
-        except Exception as e:
-            raise RuntimeError(
-                f"read_modis_ll_to_geotiff: MODIS convert failed for variable '{var}', product '{product}', year {year}: {e}"
-            ) from e
+        var_norm = ''.join(ch for ch in var.lower() if ch.isalnum())
+        # Find the matching HDF4_EOS subdataset path in each tile
+        sds_paths = []
+        for hdf_file in hdf_files:
+            ds_hdf = gdal.Open(hdf_file)
+            if ds_hdf is None:
+                raise RuntimeError(
+                    f"read_modis_ll_to_geotiff: GDAL could not open {hdf_file}"
+                )
+            matched = None
+            for sds_name, sds_desc in ds_hdf.GetSubDatasets():
+                sds_name_norm = ''.join(ch for ch in sds_name.lower() if ch.isalnum())
+                sds_desc_norm = ''.join(ch for ch in sds_desc.lower() if ch.isalnum())
+                if var_norm in sds_name_norm or var_norm in sds_desc_norm:
+                    matched = sds_name
+                    break
+            ds_hdf = None  # close
+            if matched is None:
+                raise RuntimeError(
+                    f"read_modis_ll_to_geotiff: variable '{var}' not found in {hdf_file}"
+                )
+            sds_paths.append(matched)
 
-        full_tif = output_dir / f"{var}_{year}_full.tif"
         output_tif = output_dir / f"{var}_{year}.tif"
-        # clip to ll_limits bounding box: (min_lon, max_lon, min_lat, max_lat)
-        min_lat, max_lat, min_lon, max_lon = ll_limits
-        gdal.Warp(
-            str(output_tif),
-            str(full_tif),
-            outputBounds=(min_lon, min_lat, max_lon, max_lat),
-            outputBoundsSRS='EPSG:4326'
+        warp_kwargs = dict(
+            format='GTiff',
+            dstSRS='EPSG:4326',
+            resampleAlg=gdal.GRA_NearestNeighbour,
         )
-        full_tif.unlink(missing_ok=True)   # remove unclipped intermediate
+        if ll_limits is not None:
+            min_lat, max_lat, min_lon, max_lon = ll_limits
+            warp_kwargs['outputBounds'] = (min_lon, min_lat, max_lon, max_lat)
+            warp_kwargs['outputBoundsSRS'] = 'EPSG:4326'
+
+        if len(sds_paths) == 1:
+            # Single tile — Warp directly from the subdataset path
+            gdal.Warp(str(output_tif), sds_paths[0], **warp_kwargs)
+        else:
+            # Multiple tiles — build an in-memory VRT mosaic, then Warp
+            vrt_path = str(output_dir / f"{var}_{year}_mosaic.vrt")
+            vrt = gdal.BuildVRT(vrt_path, sds_paths)
+            vrt.FlushCache()
+            vrt = None  # close before Warp reads it
+            try:
+                gdal.Warp(str(output_tif), vrt_path, **warp_kwargs)
+            finally:
+                Path(vrt_path).unlink(missing_ok=True)
+
+        if not output_tif.exists():
+            raise RuntimeError(
+                f"read_modis_ll_to_geotiff: GeoTIFF not created for {product} '{var}' at {output_tif}"
+            )
+        logger.info(f"read_modis_ll_to_geotiff: wrote {product} {output_tif}")
         out[var] = output_tif
 
     return out

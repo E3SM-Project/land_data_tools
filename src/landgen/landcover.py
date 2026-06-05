@@ -7,12 +7,16 @@
 
 import multiprocessing as mp
 import logging
+import shutil
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from . import shared_data
 from . import landgen_io
-import landcover_remote_sensing as lc_rs
-import transitions # not created yet
-import normalize_cell # not created yet
+from . import tools
+from . import landcover_remote_sensing as lc_rs
+#from . import transitions # not created yet
+#from . import normalize_cell # not created yet
 import os
 
 logger = logging.getLogger('landgen')
@@ -35,8 +39,8 @@ resource_logger = logging.getLogger('ClusterMonitor')
 ## output
 
 def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-                            com_config_dict, out_grid_data, cell_indices, ll_limits,
-                            man_lock, grid_lock):
+                            com_config_dict, out_grid_data, cell_indices, ll_limits
+                            ):
 
     # todo: need to sort out printing from multiple processes
     #print(f"Processing landcover module year {year} with parameters:")
@@ -47,7 +51,21 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     # Each worker gets its own subdirectory to avoid cross-worker file collisions.
     scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
     tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'landcover_{year}_'))
-    #print(f"  landcover_process: worker temp dir: {tmp_dir}")
+
+    # Re-attach logging in this worker process.  In forkserver mode each worker
+    # starts as a clean process with no logging handlers configured.
+    log_path = com_config_dict.get('log_path')
+    if log_path:
+        tools.init_worker_logging(log_path)
+
+    # Redirect uraster's auto-created log files (utility.log, uraster.log, etc.)
+    # from the process CWD into the run output directory.
+    out_path = com_config_dict.get('out_path')
+    if out_path:
+        tools.redirect_uraster_logs(out_path)
+
+    worker_id = f"{mp.current_process().name} (pid {os.getpid()})"
+    logger.info(f"[landcover_process] START  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  worker={worker_id}  year={year}  chunk_size={len(cell_indices)}")
 
     try:
 
@@ -77,6 +95,12 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
             # read modis cover data - use tmp_dir because the data are downloaded (not stored)
             # reading both the igbp cover data and the veg continuous fields data
             lc_rs_geotiffs = lc_rs.read_to_geotiff(year, lc_rs_name, tmp_dir, cell_indices, ll_limits)
+            if not lc_rs_geotiffs:
+                logger.warning(
+                    "landcover_process: no remote-sensing GeoTIFFs found; skipping chunk "
+                    f"year={year} ll_limits={ll_limits} n_cells={len(cell_indices)}"
+                )
+                return lt_chunk_data
         else:
             # read and process previous year's landgen land type data and transitions to calculate this year's land cover distribution
             if prev_year is not None:
@@ -154,14 +178,17 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         if 'LC_Type1' in lc_rs_data:
             lt_chunk_data.pct_pft[:, 0] = lc_rs_data['LC_Type1']
         if 'LW' in lc_rs_data:
-            # MODIS LW: 0=water, 1=land; pct_ocean = fraction that is water = 1 - LW
-            lt_chunk_data.pct_ocean[:] = 1.0 - lc_rs_data['LW']
+            # MODIS LW: 1=water, 2=land
+            # for now just set the pct_ocean to 1 for water cells and 0 for land cells
+            lw_mask = (lc_rs_data['LW'] == 1)
+            lt_chunk_data.pct_ocean[lw_mask] = lc_rs_data['LW'][lw_mask]
         if 'Percent_Tree_Cover' in lc_rs_data:
             lt_chunk_data.pct_pft[:, 1] = lc_rs_data['Percent_Tree_Cover']
 
         return lt_chunk_data
 
     finally:
+        logger.info(f"[landcover_process] FINISH {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  worker={worker_id}  year={year}  chunk_size={len(cell_indices)}")
         # clean up worker temp dir regardless of success or failure
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -181,22 +208,27 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     logger.info(f"Processing landcover module")
     # todo: print the parameters here
 
-    # number of available cpu cores (set by shell run script during job submission)
-    cpus_avail = os.environ.get('SRUN_CPUS_PER_TASK')
+    # Determine the number of worker processes to use.
+    # Priority: SRUN_CPUS_PER_TASK (set explicitly in submit script via srun)
+    #        -> SLURM_CPUS_PER_TASK (set by SLURM when --cpus-per-task is in the sbatch directives)
+    #        -> SLURM_CPUS_ON_NODE  (total CPUs allocated to this job on this node; always set by SLURM)
+    #        -> mp.cpu_count()      (all logical cores; safe for local runs)
+    in_slurm = os.environ.get('SLURM_JOB_ID') is not None
 
-    if cpus_avail is not None:
-        try:
-            # Convert the string value to an integer
-            cpus_avail_int = int(cpus_avail)
-            logger.info(f"SRUN_CPUS_PER_TASK is set to: {cpus_avail_int}")
-        except ValueError:
-            logger.warning(f"SRUN_CPUS_PER_TASK is set to an invalid integer value: {cpus_avail}")
+    cpus_avail_int = (
+        tools.parse_cpu_env('SRUN_CPUS_PER_TASK') or
+        tools.parse_cpu_env('SLURM_CPUS_PER_TASK') or
+        tools.parse_cpu_env('SLURM_CPUS_ON_NODE') or
+        mp.cpu_count()
+    )
+
+    if in_slurm:
+        logger.info(f"Running under SLURM (job {os.environ['SLURM_JOB_ID']}): using {cpus_avail_int} workers "
+                    f"(SRUN_CPUS_PER_TASK={os.environ.get('SRUN_CPUS_PER_TASK')}, "
+                    f"SLURM_CPUS_PER_TASK={os.environ.get('SLURM_CPUS_PER_TASK')}, "
+                    f"SLURM_CPUS_ON_NODE={os.environ.get('SLURM_CPUS_ON_NODE')})")
     else:
-        logger.warning("SRUN_CPUS_PER_TASK environment variable is not set.")
-        # If not set, set to total cores on the node
-        cpus_avail_int = mp.cpu_count()
-        logger.warning(f"Using total cores: {cpus_avail_int}, but this may fail if "
-                       "SBATCH --cpus-per-task is set to a lower number or SBATCH --exclusive is not set")
+        logger.info(f"Running locally: using {cpus_avail_int} workers (mp.cpu_count())")
 
     # set up the pool and call the landcover_process() function for each chunk of data
     # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
@@ -206,8 +238,8 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
 
     # get the manager locks for the shared data structures
     # using data-specific locks, watch out for deadlocks.  
-    man_lock  = manager.Lock()
-    grid_lock = manager.Lock()
+    #man_lock  = manager.Lock()
+    #grid_lock = manager.Lock()
 
 ## todo: figure out the data to pass here
 # each chunk is a tuple of the arguments for landcover_process, residing in a list
@@ -238,7 +270,6 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         data_chunks.append((
             year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
             com_config_dict, out_grid_data, decomp_indices[cidx], decomp_ll_limits[cidx],
-            man_lock, grid_lock
         ))
 
     logger.info(f"Submitting {len(data_chunks)} landcover chunks to pool of {cpus_avail_int} workers")
@@ -247,11 +278,15 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         f"Submitting {len(data_chunks)} landcover chunks to pool of {cpus_avail_int} workers")
 
     # submit the chunks to the pool
+    # todo: remove subset limit before production run
+    #N = 128
     with mp.Pool(processes=cpus_avail_int) as pool:
         chunk_list_results = pool.starmap(landcover_process, data_chunks)
 
     # copy the results into the shared lt_year_data structure
+    # only copy fields that this module actually updates in lt_chunk_data
+    updated_vars = ['pct_pft', 'pct_ocean']
     for chunk_result in chunk_list_results:
-        lt_year_data.copy_from(chunk_result)
+        lt_year_data.copy_from(chunk_result, updated_vars)
 
     return

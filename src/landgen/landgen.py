@@ -7,11 +7,10 @@ import multiprocessing as mp
 import importlib
 import json
 import os
+from pathlib import Path
 import sys
 import logging
 from datetime import datetime
-from pathlib import Path
-import pandas as pd
 from . import shared_data
 from . import landgen_io
 from . import tools
@@ -57,7 +56,8 @@ def main(config_path):
                 'source_data_path': config.get('source_data_path', ''),
                 'landgen_grid_path': config.get('landgen_grid_path', ''),
                 'out_path': config.get('out_path', ''),
-                'decomp_box_size_degrees': config.get('decomp_box_size_degrees', 10)
+                'decomp_box_size_degrees': config.get('decomp_box_size_degrees', 10),
+                'log_path': str(out_path / log_name),
             }
     manager = mp.Manager()
     com_config_dict = manager.dict(temp_dict)
@@ -86,9 +86,9 @@ def main(config_path):
     # note that indices are 0-based in these arrays
     decomp_indices   = []
     decomp_ll_limits = []
-    mesh_nc_path = Path(temp_dict['source_data_path']) / temp_dict['landgen_grid_path']
-    chunk_file = landgen_io.set_decomp_cell_idx_ll_limits(mesh_nc_path, decomp_indices, decomp_ll_limits,
-                                                          out_dir=temp_dict['out_path'])
+    mesh_nc_path = Path(com_config_dict['source_data_path']) / com_config_dict['landgen_grid_path']
+    chunk_file = landgen_io.set_decomp_cell_idx_ll_limits(mesh_nc_path, decomp_indices, decomp_ll_limits, 
+            com_config_dict['decomp_box_size_degrees'], com_config_dict['out_path'])
 
     ## todo: read in the grid file and set the values in out_grid_data - may not need this?
     # actually, get this info and store it for now; probably don't need the manager and lock stuff, though
@@ -121,13 +121,27 @@ def main(config_path):
                 else:
                     logger.warning(f"Module {name} does not have a 'run' function.")
             except ImportError as e:
-                logger.error(f"Could not import module {name}: {e}")
+                logger.error(f"Could not import module {name}: {e}; skipping.")
 
     except Exception as e:
         logger.exception(f"ERROR in landgen: {e}")
         raise
 
     finally:
+        # remove uraster side logs only from run/submit cwd locations.
+        # keep copies in out_path for diagnostics.
+        uraster_log_names = ('extract.log', 'intersect.log', 'uraster.log', 'utility.log')
+        cleanup_dirs = [Path.cwd()]
+        submit_dir = os.environ.get('SLURM_SUBMIT_DIR')
+        if submit_dir:
+            cleanup_dirs.append(Path(submit_dir))
+        for d in cleanup_dirs:
+            for name in uraster_log_names:
+                try:
+                    (d / name).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         manager.shutdown()
         stop_event.set()
         resource_monitor_thread.join()

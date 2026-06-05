@@ -5,7 +5,7 @@
 # the goal is to be able to add different source data definitions here
 #    and use a generic api to landcover.py
 
-import .landgen_io as landgen_io
+from . import landgen_io
 
 #### set some parameters for the landcover remote sensing data here
 
@@ -18,6 +18,15 @@ modis_products = ['MCD12Q1.061', 'MOD44B.061']
 modis_lc_variable_names = ['LC_Type1', 'LW']
 # MOD44B: water cell has value==200; not using Quality
 modis_vcf_variable_names = ['Percent_Tree_Cover', 'Percent_NonTree_Vegetation', 'Percent_NonVegetated']  
+
+# note that there are no modis tiles for these products for:
+#    easter island (ll_limtis=(-27.363585, -26.944359, -109.599609, -109.160156))
+#    sao pedro e sao paulo islands (ll_limtis=(0.74606, 1.044512, -29.53125, -29.179688))
+#    random southern ocean ice island (ll_limtis=(-54.628738, -54.244919, 3.28125, 3.534031))
+
+# todo: don't need LW above from MCD12Q1; get land/water mask from MOD44B data
+#    the water cells in MOD44B are from MOD44W, and are the highest res land/water mask;
+#    LW is from MOD44W, with water cell where 2 or more MOD44W cells are water
 
 # todo: dictionary for modis to elm land type mapping
 

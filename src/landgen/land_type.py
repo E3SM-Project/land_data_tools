@@ -10,10 +10,10 @@ import importlib
 import logging
 from pathlib import Path
 from . import shared_data
-from . import landgen_io
-from . import tools
 from .shared_data import LtData
 import numpy as np
+from . import landgen_io
+from . import tools
 import pandas as pd
 
 logger = logging.getLogger('landgen')
@@ -77,7 +77,7 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
         lc_data = ice.run(lt_year_data, year, prev_year, ice_path, com_config_dict, out_grid_data,
                             decomp_indices, decomp_ll_limits, manager)
 
-    if submod_run['wetland']:
+    #if submod_run['wetland']:
         # Process wetland data - adjust lc wetland area
         # (may not be needed as the main source is currently the modis cover data;
         #  can allow for this in the future)
@@ -94,11 +94,11 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
                         grazing_names, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager)
 
     # Normalize cell
-    normalize_cell = importlib.import_module('landgen.normalize_cell')
-    lc_data = normalize_cell.fill_land(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits,
-                    manager)       # fill_land
-    lc_data = normalize_cell.reconcile_ocean(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits,
-                    manager)  # reconcile_ocean
+    #normalize_cell = importlib.import_module('landgen.normalize_cell')
+    #lc_data = normalize_cell.fill_land(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits,
+    #                manager)       # fill_land
+    #lc_data = normalize_cell.reconcile_ocean(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits,
+    #               manager)  # reconcile_ocean
 
     if submod_run['veg_assoc']:
         # Process veg-associated data
@@ -107,8 +107,8 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
                             decomp_indices, decomp_ll_limits, manager)
 
     # Ensure consistency
-    consistency = importlib.import_module('landgen.consistency')
-    lc_data = consistency.run(lt_year_data, year, out_grid_data, decomp_indices, decomp_ll_limits, manager)
+    #consistency = importlib.import_module('landgen.consistency')
+    #lc_data = consistency.run(lt_year_data, year, out_grid_data, decomp_indices, decomp_ll_limits, manager)
 
     return
 
@@ -180,6 +180,10 @@ def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_
                             veg_assoc_path, com_config_dict, out_grid_data, manager,
                             decomp_indices, decomp_ll_limits)
 
+        # no - would have to read in while file to reverse the order - append this year's data to the output file
+        # these data may need to be appended chunk by chunk if memory is an issue, but try writing the whole year at once first
+        # todo: can write each year, then combine at end in proper order 
+
         # set timevars in shared_data for each data class
         # for now:
         varnames = ['pct_pft', 'pct_ocean']
@@ -200,9 +204,11 @@ def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_
 
     ## todo: this is temporary for testing? or maybe not?
     # just plot the start year for now
-    plot_fname_year = f"{out_fname_year.stem}_{start_year}{out_fname_year.suffix}"
-    tools.plot_module_netcdf(file_path, out_path, start_year, varnames=varnames, layers=None,
-                       plot_type='scatter', file_type='pdf',
+    #plot_fname_year = f"{out_fname_year.stem}_{start_year}{out_fname_year.suffix}"
+    ncdf_path = Path(out_path) / out_fname_year
+    print_layers = [0, 1]
+    tools.plot_module_netcdf(ncdf_path, out_path, start_year, varnames=varnames, layers=print_layers,
+                       plot_type='scatter', file_type='png',
                        colormap='viridis', ll_limits=None)
 
     # free the module-specific shared data structure

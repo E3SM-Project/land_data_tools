@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from . import shared_data
 from . import landgen_io
+from . import tools
 # import normalize_cell # not created yet
 import pandas as pd
 import numpy as np
@@ -164,7 +165,7 @@ def _harvest_process_impl(year, grazing_names,
 ## this sets up the pool and calls the harvest_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager, grid_manager):
+        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager):
 
     print(f"Processing harvest module with parameters:")
     # todo: print the parameters here
@@ -193,22 +194,24 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # coordinate written to the output NetCDF.
     cellid_to_idx = {int(cid): idx for idx, cid in enumerate(global_mesh_df['cellid'].values)}
 
-    # number of available cpu cores (set by SBATCH during job submission)
-    omp_threads_str = os.environ.get('OMP_NUM_THREADS')
+    # Determine the number of worker processes to use.
+    # Priority: SRUN_CPUS_PER_TASK -> SLURM_CPUS_PER_TASK -> SLURM_CPUS_ON_NODE -> mp.cpu_count()
+    in_slurm = os.environ.get('SLURM_JOB_ID') is not None
 
-    if omp_threads_str is not None:
-        try:
-            omp_threads_int = int(omp_threads_str)
-            print(f"OMP_NUM_THREADS is set to: {omp_threads_int}")
-        except ValueError:
-            print(f"OMP_NUM_THREADS is set to an invalid integer value: {omp_threads_str}; falling back to 32")
-            omp_threads_int = 32
+    omp_threads_int = (
+        tools.parse_cpu_env('SRUN_CPUS_PER_TASK') or
+        tools.parse_cpu_env('SLURM_CPUS_PER_TASK') or
+        tools.parse_cpu_env('SLURM_CPUS_ON_NODE') or
+        mp.cpu_count()
+    )
+
+    if in_slurm:
+        logger.info(f"Running under SLURM (job {os.environ['SLURM_JOB_ID']}): using {omp_threads_int} workers "
+                    f"(SRUN_CPUS_PER_TASK={os.environ.get('SRUN_CPUS_PER_TASK')}, "
+                    f"SLURM_CPUS_PER_TASK={os.environ.get('SLURM_CPUS_PER_TASK')}, "
+                    f"SLURM_CPUS_ON_NODE={os.environ.get('SLURM_CPUS_ON_NODE')})")
     else:
-        print("OMP_NUM_THREADS environment variable is not set.")
-        # Default to 4 — safe for login nodes and small test runs.
-        # On a full SLURM allocation, always set OMP_NUM_THREADS via the job script.
-        omp_threads_int = 4
-        print(f"Using {omp_threads_int} workers (default; set OMP_NUM_THREADS to override).")
+        logger.info(f"Running locally: using {omp_threads_int} workers (mp.cpu_count())")
 
     # set up the pool and call the harvest_process() function for each chunk of data
     # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
