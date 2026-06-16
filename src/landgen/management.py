@@ -34,11 +34,6 @@ LUH2_HARVEST_VARS = [
     'secnf_bioh',   # wood harvest biomass carbon from secondary non forest land
 ]
 
-# HEALPix 10km equal-area cell area in km².
-# All cells have identical area (confirmed from merged_land_cells.parquet: min=max=1.625086e8 m²).
-# Used to convert HYDE3.5 grazing data from km² to dimensionless fraction (0-1).
-HEALPIX_CELL_AREA_KM2 = 162.5086
-
 ########## define helper functions for management run() here
 
 ##### management_process()
@@ -157,7 +152,14 @@ def _management_process_impl(year, grazing_names,
             tmp_dir / category,
             category,
         )
-        regridded = regridded / HEALPIX_CELL_AREA_KM2  # km² → fraction
+        # Dynamically calculate or extract the cell area in km² from the mesh data
+        # (Assuming 'area' column exists in meters squared, divide by 1e6 to get km²)
+        if 'area' in global_mesh_df.columns:
+            cell_area_km2 = global_mesh_df['area'].iloc[0] / 1_000_000
+        else:
+            cell_area_km2 = 162.5086 # Assuming HEALPix 10km equal-area cell area in km²
+
+        regridded = regridded / cell_area_km2  # km² → fraction
         np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
         grazing_results.append((i, regridded))
 
