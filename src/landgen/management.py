@@ -1,7 +1,5 @@
-# harvest.py
+# management.py
 # this module processes harvest and grazing data for the landgen workflow
-# the output is a complete harvest distribution
-#    and includes some data associated with particular harvests
 
 # run() function is the main entry point for this module, and will be called by process_single_year in land_type.py
 
@@ -29,6 +27,11 @@ LUH2_HARVEST_VARS = [
     'secmf_harv',   # wood harvest area from secondary mature forest land
     'secyf_harv',   # wood harvest area from secondary young forest land
     'secnf_harv',   # wood harvest area from secondary non forest land
+    'primf_bioh',   # wood harvest biomass carbon from primary forest land
+    'primn_bioh',   # wood harvest biomass carbon from primary non forest land
+    'secmf_bioh',   # wood harvest biomass carbon from secondary mature forest land
+    'secyf_bioh',   # wood harvest biomass carbon from secondary young forest land
+    'secnf_bioh',   # wood harvest biomass carbon from secondary non forest land
 ]
 
 # HEALPix 10km equal-area cell area in km².
@@ -36,16 +39,16 @@ LUH2_HARVEST_VARS = [
 # Used to convert HYDE3.5 grazing data from km² to dimensionless fraction (0-1).
 HEALPIX_CELL_AREA_KM2 = 162.5086
 
-########## define helper functions for harvest run() here
+########## define helper functions for management run() here
 
-##### harvest_process()
+##### management_process()
 
 ## arguments
 # lc_data: land cover data structure that is passed between modules
 # year: the year for which to process the land cover data
 # source_data_path: base path to the source data
 # landgen_grid_path: path from source_data_path and the filename of the landgen grid
-# out_path: base path for the output data; this is needed to read in the previous year's harvest data
+# out_path: base path for the output data; this is needed to read in the previous year's management data
 
 ## output
 
@@ -75,32 +78,32 @@ def _worker_init(global_mesh_df, cellid_to_idx, com_config_dict,
     _g_grazing_data    = grazing_data
     _g_grazing_names   = grazing_names
 
-def _harvest_process_star(args):
+def _management_process_star(args):
     """Unpack tuple args for pool.imap_unordered (lambdas can't be pickled)."""
     t0 = time.time()
-    result = harvest_process(*args)
+    result = management_process(*args)
     elapsed = time.time() - t0
     year, ll_limits, _ = args
     print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
     return result
 
-def harvest_process(year, ll_limits, cell_ids):
+def management_process(year, ll_limits, cell_ids):
     """Compute regridded harvest/grazing for one spatial chunk.
     Data comes from worker globals (set once via initializer, not per task).
     Returns (row_indices, harvest_results, grazing_results) — no proxy access.
     """
     try:
-        return _harvest_process_impl(
+        return _management_process_impl(
             year, _g_grazing_names,
             _g_com_config_dict, ll_limits, cell_ids,
             _g_global_mesh_df, _g_cellid_to_idx,
             _g_harvest_data, _g_grazing_data,
         )
     except Exception:
-        print(f"ERROR in harvest_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
+        print(f"ERROR in management_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
         raise
 
-def _harvest_process_impl(year, grazing_names,
+def _management_process_impl(year, grazing_names,
                     com_config_dict, ll_limits, cell_ids,
                     global_mesh_df, cellid_to_idx,
                     harvest_data, grazing_data):
@@ -113,7 +116,7 @@ def _harvest_process_impl(year, grazing_names,
     tmp_dir = (
         Path(com_config_dict['out_path'])
         / 'tmp'
-        / f"harvest_{year}_{min_lat:.0f}_{min_lon:.0f}"
+        / f"management_{year}_{min_lat:.0f}_{min_lon:.0f}"
     )
 
     # convert HEALPix cell_ids to positional row indices into lt_year_data arrays
@@ -123,8 +126,10 @@ def _harvest_process_impl(year, grazing_names,
     harvest_results = []
 
     # --- regrid and store harvest variables into lt_year_data.harvest_frac ---
-    # LUH2_HARVEST_VARS order matches the n_harvest=5 dimension in LtData:
+    # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
     #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
+    # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
+    #  Note that the biomass carbon variables (primf_bioh, etc) are not currently used in mksurfdat, but we regrid them here for completeness and potential future use.
     for i, varname in enumerate(LUH2_HARVEST_VARS):
         regridded = landgen_io.regrid_to_landgen_grid(
             harvest_data[varname],
@@ -162,12 +167,12 @@ def _harvest_process_impl(year, grazing_names,
 ########## run()
 
 ## called by land_type.process_single_year() for each year, and this is where the multiprocessing happens for the landcover module
-## this sets up the pool and calls the harvest_process() function for each chunk of data
+## this sets up the pool and calls the management_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
         com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager):
 
-    print(f"Processing harvest module with parameters:")
+    print(f"Processing management module with parameters:")
     # todo: print the parameters here
 
     # load the global HEALPix mesh parquet once here so worker processes
@@ -213,7 +218,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     else:
         logger.info(f"Running locally: using {omp_threads_int} workers (mp.cpu_count())")
 
-    # set up the pool and call the harvest_process() function for each chunk of data
+    # set up the pool and call the management_process() function for each chunk of data
     # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
     #    these are created in land_type.process_single_year() and passed to this run() function as lists?
     # there are more chunks than cpus; the pool will manage this for efficiency because chunks vary in size
@@ -241,7 +246,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     data_chunks.sort(key=lambda t: len(t[2]), reverse=True)
 
     n_chunks = len(data_chunks)
-    print(f"  Submitting {n_chunks} harvest chunks to pool of {omp_threads_int} workers")
+    print(f"  Submitting {n_chunks} management chunks to pool of {omp_threads_int} workers")
 
     # Use fork-based Pool with an initializer that sets worker globals once at startup.
     # - fork: workers inherit parent memory (numpy arrays are copy-on-write) — no
@@ -258,13 +263,13 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
                       harvest_data, grazing_data, grazing_names)) as pool:
         done_count = 0
         for row_indices, harvest_results, grazing_results in pool.imap_unordered(
-                _harvest_process_star, data_chunks):
+                _management_process_star, data_chunks):
             for i, regridded in harvest_results:
                 lt_year_data.set_harvest_frac(row_indices, i, regridded)
             for i, regridded in grazing_results:
                 lt_year_data.set_grazing_frac(row_indices, i, regridded)
             done_count += 1
             if done_count % 50 == 0 or done_count == n_chunks:
-                print(f"  Harvest progress: {done_count}/{n_chunks} chunks done", flush=True)
+                print(f"  Managementprogress: {done_count}/{n_chunks} chunks done", flush=True)
 
     return

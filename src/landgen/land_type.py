@@ -86,11 +86,11 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
         #                    decomp_indices, decomp_ll_limits, manager)
         pass
 
-    if submod_run['harvest']:
+    if submod_run['management']:
         #todo: update this with more efficient decomp and generalized reading and chunking
         # Process harvest/grazing data - adjust harvest/grazing area
-        harvest = importlib.import_module('landgen.harvest')
-        lc_data = harvest.run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
+        management = importlib.import_module('landgen.management')
+        lc_data = management.run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
                         grazing_names, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager)
 
     # Normalize cell

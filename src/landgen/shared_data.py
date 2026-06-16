@@ -18,7 +18,7 @@ import numpy as np
 
 # LtData dimensions
 n_pfts_default = 51
-n_harvest_default = 5
+n_harvest_default = 10
 n_grazing_default = 2
 n_elev_default = 61
 n_elev_edges_default = 62
@@ -164,7 +164,7 @@ TopoManager.register('TopoData', TopoData)
 # These data are on the landgen grid defined by GridData 
 # n_cells: number of 'land' cells in the landgen grid
 # n_pfts: number of plant functional types (51, includes bare and crop functional types)
-# n_harvest: number of harvest types (5: luh categories)
+# n_harvest: number of harvest types (10: luh categories)
 # n_grazing: number of grazing types (2: pasture (grass, intensive) and rangeland)
 # n_elev: number of elevation bins for glacier cover (currently 61, may change)
 # n_elev_edges: number of elevation bin edges for glacier cover (n_elev + 1)
