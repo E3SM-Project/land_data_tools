@@ -141,6 +141,9 @@ def _management_process_impl(year, grazing_names,
     # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
     # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
     # area to convert to a dimensionless fraction (0-1).
+    # Calculate cell area once (constant for all HEALPix cells)
+    cell_area_km2 = landgen_io.get_cell_area_km2(global_mesh_df)
+
     grazing_results = []
     for i, category in enumerate(grazing_names.keys()):
         regridded = landgen_io.regrid_to_landgen_grid(
@@ -152,13 +155,6 @@ def _management_process_impl(year, grazing_names,
             tmp_dir / category,
             category,
         )
-        # Dynamically calculate or extract the cell area in km² from the mesh data
-        # (Assuming 'area' column exists in meters squared, divide by 1e6 to get km²)
-        if 'area' in global_mesh_df.columns:
-            cell_area_km2 = global_mesh_df['area'].iloc[0] / 1_000_000
-        else:
-            cell_area_km2 = 162.5086 # Assuming HEALPix 10km equal-area cell area in km²
-
         regridded = regridded / cell_area_km2  # km² → fraction
         np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
         grazing_results.append((i, regridded))
@@ -179,13 +175,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
 
     # load the global HEALPix mesh parquet once here so worker processes
     # don't each re-read the 37 MB file; pass the DataFrame into each chunk tuple
-    global_parquet_path = (
-        Path(com_config_dict['source_data_path'])
-        / Path(com_config_dict['landgen_grid_path']).parent
-        / 'merged_land_cells.parquet'
-    )
-    global_mesh_df = pd.read_parquet(global_parquet_path)
-    print(f"  Loaded HEALPix mesh: {len(global_mesh_df)} cells from {global_parquet_path}")
+    global_mesh_df = landgen_io.load_global_mesh_parquet(com_config_dict)
 
     # read source data once here — workers reuse via initializer globals
     print(f"  Reading LUH2 harvest data for year {year}...")
@@ -194,12 +184,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     grazing_data = landgen_io.read_hyde_grazing(year, grazing_path, grazing_names)
 
     # build a mapping from HEALPix cellid -> positional row index in lt_year_data arrays
-    # the row order matches the parquet row order — same order used in landgen.py
-    # (out_grid_data.cell_id) and land_type.py (lt_year_data allocation).
-    # DO NOT sort here: sorting would create a different ordering than the parquet row
-    # order, causing lt_year_data array positions to be mismatched with the cell_id
-    # coordinate written to the output NetCDF.
-    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(global_mesh_df['cellid'].values)}
+    cellid_to_idx = landgen_io.build_cellid_to_idx_map(global_mesh_df)
 
     # Determine the number of worker processes to use.
     # Priority: SRUN_CPUS_PER_TASK -> SLURM_CPUS_PER_TASK -> SLURM_CPUS_ON_NODE -> mp.cpu_count()

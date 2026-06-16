@@ -199,6 +199,77 @@ def calc_ll_limits(size_degrees):
     return ll_limits
 
 #--------------------------------------------------------------------------
+def load_global_mesh_parquet(com_config_dict):
+    """
+    Load the global HEALPix mesh parquet file.
+
+    Args:
+        com_config_dict (dict): Common configuration dictionary containing
+                                'source_data_path' and 'landgen_grid_path'.
+
+    Returns:
+        pd.DataFrame: Global mesh DataFrame with columns ['cellid', 'lon', 'lat',
+                      'area', 'geometry', 'geometry_bbox'].
+    """
+    global_parquet_path = (
+        Path(com_config_dict['source_data_path'])
+        / Path(com_config_dict['landgen_grid_path']).parent
+        / 'merged_land_cells.parquet'
+    )
+    if not global_parquet_path.exists():
+        raise FileNotFoundError(
+            f"load_global_mesh_parquet: Global mesh parquet not found: {global_parquet_path}"
+        )
+
+    global_mesh_df = pd.read_parquet(global_parquet_path)
+    logger.info(f"load_global_mesh_parquet: loaded {len(global_mesh_df)} cells from {global_parquet_path}")
+    return global_mesh_df
+
+#--------------------------------------------------------------------------
+def build_cellid_to_idx_map(global_mesh_df):
+    """
+    Build a mapping from HEALPix cellid to positional row index.
+
+    The row order matches the parquet row order — same order used in landgen.py
+    (out_grid_data.cell_id) and land_type.py (lt_year_data allocation).
+    DO NOT sort: sorting would create a different ordering than the parquet row
+    order, causing array positions to be mismatched with the cell_id coordinate
+    written to the output NetCDF.
+
+    Args:
+        global_mesh_df (pd.DataFrame): Global mesh DataFrame with 'cellid' column.
+
+    Returns:
+        dict: Mapping {cellid: row_index} for all cells in the mesh.
+    """
+    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(global_mesh_df['cellid'].values)}
+    logger.info(f"build_cellid_to_idx_map: built mapping for {len(cellid_to_idx)} cells")
+    return cellid_to_idx
+
+#--------------------------------------------------------------------------
+def get_cell_area_km2(global_mesh_df):
+    """
+    Get the HEALPix cell area in km².
+
+    Extracts the area from the mesh DataFrame (in m²) and converts to km².
+    Falls back to the standard HEALPix 10km equal-area cell size if 'area'
+    column is not present.
+
+    Args:
+        global_mesh_df (pd.DataFrame): Global mesh DataFrame with optional 'area' column.
+
+    Returns:
+        float: Cell area in km². For HEALPix 10km grid, this is constant ≈ 162.5086 km².
+    """
+    if 'area' in global_mesh_df.columns:
+        cell_area_km2 = global_mesh_df['area'].iloc[0] / 1_000_000
+        logger.info(f"get_cell_area_km2: extracted cell area = {cell_area_km2:.4f} km² from mesh DataFrame")
+    else:
+        cell_area_km2 = 162.5086  # HEALPix 10km equal-area cell area in km²
+        logger.info(f"get_cell_area_km2: using default HEALPix 10km cell area = {cell_area_km2:.4f} km²")
+    return cell_area_km2
+
+#--------------------------------------------------------------------------
 def _get_year_idx(time_values, year, ncfile, time_units=None):
     """
     Find the time index in a NetCDF time axis for the requested calendar year.
@@ -1394,11 +1465,13 @@ def write_lt_year_data_to_netcdf(lt_year_data, cell_ids, year, out_path, out_fna
 #--------------------------------------------------------------------------
 
 #--------------------------------------------------------------------------
-def get_chunk_cell_ids(size_degrees):
+def get_chunk_cell_ids(com_config_dict, size_degrees):
     """Determine the landgen grid cell ids that intersect each lat-lon chunk.
     There will be duplicate cell ids across chunks; filter these later      
 
     Args:
+        com_config_dict (dict): Common configuration dictionary containing
+                                'source_data_path' and 'landgen_grid_path'.
         size_degrees (float): Size of the lat-lon chunks in degrees (e.g. 10 for 10x10 degree chunks).
 
     Returns:
@@ -1408,7 +1481,7 @@ def get_chunk_cell_ids(size_degrees):
     # The implementation would depend on how the global mesh is structured and stored.
     # For example, if the global mesh has 'cellid', 'lat', and 'lon' columns, we could do something like:
 
-    global_mesh_df = pd.read_parquet('path_to_global_mesh.parquet')  # adjust path as needed
+    global_mesh_df = load_global_mesh_parquet(com_config_dict)
     ll_limits = calc_ll_limits(size_degrees)
     chunk_cell_ids = []
     for min_lat, max_lat, min_lon, max_lon in ll_limits:
