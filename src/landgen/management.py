@@ -16,6 +16,7 @@ import numpy as np
 import os
 import traceback
 import time
+import shutil
 
 logger = logging.getLogger('landgen')
 
@@ -52,22 +53,22 @@ LUH2_HARVEST_VARS = [
 ## Using fork + initializer means these large arrays are copy-on-write shared
 ## across all workers — no re-import overhead, no per-task pickling of large data.
 ## IMPORTANT: no manager proxy objects here — those cause deadlocks when forked.
-_g_global_mesh_df  = None
+_g_out_grid_data   = None
 _g_cellid_to_idx   = None
 _g_com_config_dict = None
 _g_harvest_data    = None
 _g_grazing_data    = None
 _g_grazing_names   = None
 
-def _worker_init(global_mesh_df, cellid_to_idx, com_config_dict,
+def _worker_init(out_grid_data, cellid_to_idx, com_config_dict,
                  harvest_data, grazing_data, grazing_names):
     """Pool initializer: store read-only data as process-local globals.
     Called once per worker at pool startup (not once per task).
     All objects are plain Python/numpy — no manager proxies.
     """
-    global _g_global_mesh_df, _g_cellid_to_idx, _g_com_config_dict
+    global _g_out_grid_data, _g_cellid_to_idx, _g_com_config_dict
     global _g_harvest_data, _g_grazing_data, _g_grazing_names
-    _g_global_mesh_df  = global_mesh_df
+    _g_out_grid_data   = out_grid_data
     _g_cellid_to_idx   = cellid_to_idx
     _g_com_config_dict = com_config_dict
     _g_harvest_data    = harvest_data
@@ -92,7 +93,7 @@ def management_process(year, ll_limits, cell_ids):
         return _management_process_impl(
             year, _g_grazing_names,
             _g_com_config_dict, ll_limits, cell_ids,
-            _g_global_mesh_df, _g_cellid_to_idx,
+            _g_out_grid_data, _g_cellid_to_idx,
             _g_harvest_data, _g_grazing_data,
         )
     except Exception:
@@ -101,10 +102,11 @@ def management_process(year, ll_limits, cell_ids):
 
 def _management_process_impl(year, grazing_names,
                     com_config_dict, ll_limits, cell_ids,
-                    global_mesh_df, cellid_to_idx,
+                    out_grid_data, cellid_to_idx,
                     harvest_data, grazing_data):
-    """Pure-compute worker: reads source data, regrids, and returns chunk LtData.
+    """Pure-compute worker: reads source data, regrids using modular workflow, returns chunk LtData.
     No manager proxies, no locks — all writes happen in the main process via copy_from.
+    Uses same workflow as landcover.py: write mesh once, then regrid each variable.
     """
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
@@ -114,8 +116,9 @@ def _management_process_impl(year, grazing_names,
         / 'tmp'
         / f"management_{year}_{min_lat:.0f}_{min_lon:.0f}"
     )
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    # convert HEALPix cell_ids to positional row indices into lt_year_data arrays
+    # convert HEALPix cell_ids to positional row indices into out_grid_data arrays
     row_indices = np.array([cellid_to_idx[int(cid)] for cid in cell_ids], dtype=np.int64)
 
     # Create chunk-sized LtData object
@@ -127,46 +130,68 @@ def _management_process_impl(year, grazing_names,
     chunk_lt_data.allocate(n_cells=n_chunk_cells, n_harvest=n_harvest, n_grazing=n_grazing)
     chunk_lt_data.cell_idx = row_indices  # Map chunk positions to global indices
 
-    # --- regrid harvest variables ---
-    # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
-    #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
-    # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
-    #  Note that the biomass carbon variables (primf_bioh, etc) are not currently used in mksurfdat, but we regrid them here for completeness and potential future use.
-    for i, varname in enumerate(LUH2_HARVEST_VARS):
-        regridded = landgen_io.regrid_to_landgen_grid(
-            harvest_data[varname],
-            harvest_data['lat'],
-            harvest_data['lon'],
-            cell_ids, ll_limits,
-            global_mesh_df,
-            tmp_dir / varname,
-            varname,
-        )
-        chunk_lt_data.harvest_frac[:, i] = regridded
+    try:
+        # Write mesh once per chunk (same approach as landcover.py)
+        mesh_file = tmp_dir / 'mesh.geojson'
+        landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, row_indices)
 
-    # --- regrid grazing variables ---
-    # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
-    # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
-    # area to convert to a dimensionless fraction (0-1).
-    cell_area_km2 = landgen_io.get_cell_area_km2(global_mesh_df)
+        # --- regrid harvest variables ---
+        # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
+        #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
+        # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
+        #  Note that the biomass carbon variables (primf_bioh, etc) are not currently used in mksurfdat, but we regrid them here for completeness and potential future use.
+        for i, varname in enumerate(LUH2_HARVEST_VARS):
+            # Write source data to GeoTIFF
+            src_tif = tmp_dir / f"{varname}.tif"
+            landgen_io.write_latlon_to_geotiff(
+                harvest_data[varname],
+                harvest_data['lat'],
+                harvest_data['lon'],
+                ll_limits,
+                src_tif
+            )
+            # Regrid using modular function
+            regridded = landgen_io.regrid_to_mesh(
+                mesh_file, {varname: src_tif},
+                row_indices, out_grid_data,
+                out_type='data'
+            )
+            chunk_lt_data.harvest_frac[:, i] = regridded
 
-    # Use stems as keys (e.g., 'pasture' not 'pasture.nc') to match grazing_data dict
-    grazing_stems = [Path(name).stem for name in grazing_names.keys()]
-    for i, stem in enumerate(grazing_stems):
-        regridded = landgen_io.regrid_to_landgen_grid(
-            grazing_data[stem][stem],
-            grazing_data[stem]['lat'],
-            grazing_data[stem]['lon'],
-            cell_ids, ll_limits,
-            global_mesh_df,
-            tmp_dir / stem,
-            stem,
-        )
-        regridded = regridded / cell_area_km2  # km² → fraction
-        np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
-        chunk_lt_data.grazing_frac[:, i] = regridded
+        # --- regrid grazing variables ---
+        # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
+        # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
+        # area to convert to a dimensionless fraction (0-1).
+        # Extract from out_grid_data (more direct than via DataFrame)
+        cell_area_km2 = out_grid_data.cell_area[row_indices[0]] / 1_000_000  # m² → km²
 
-    return chunk_lt_data
+        # Use stems as keys (e.g., 'pasture' not 'pasture.nc') to match grazing_data dict
+        grazing_stems = [Path(name).stem for name in grazing_names.keys()]
+        for i, stem in enumerate(grazing_stems):
+            # Write source data to GeoTIFF
+            src_tif = tmp_dir / f"{stem}.tif"
+            landgen_io.write_latlon_to_geotiff(
+                grazing_data[stem][stem],
+                grazing_data[stem]['lat'],
+                grazing_data[stem]['lon'],
+                ll_limits,
+                src_tif
+            )
+            # Regrid using modular function
+            regridded = landgen_io.regrid_to_mesh(
+                mesh_file, {stem: src_tif},
+                row_indices, out_grid_data,
+                out_type='data'
+            )
+            regridded = regridded / cell_area_km2  # km² → fraction
+            np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
+            chunk_lt_data.grazing_frac[:, i] = regridded
+
+        return chunk_lt_data
+
+    finally:
+        # Clean up temp files
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 ########## run()
@@ -180,10 +205,6 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     print(f"Processing management module with parameters:")
     # todo: print the parameters here
 
-    # load the global HEALPix mesh parquet once here so worker processes
-    # don't each re-read the 37 MB file; pass the DataFrame into each chunk tuple
-    global_mesh_df = landgen_io.load_global_mesh_parquet(com_config_dict)
-
     # read source data once here — workers reuse via initializer globals
     print(f"  Reading LUH2 harvest data for year {year}...")
     harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS)
@@ -194,7 +215,8 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
         grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem])
 
     # build a mapping from HEALPix cellid -> positional row index in lt_year_data arrays
-    cellid_to_idx = landgen_io.build_cellid_to_idx_map(global_mesh_df)
+    # Note: out_grid_data.cell_id order must match global_mesh_df (parquet) order
+    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(out_grid_data.cell_id)}
 
     # Determine the number of worker processes to use.
     # Priority: SRUN_CPUS_PER_TASK -> SLURM_CPUS_PER_TASK -> SLURM_CPUS_ON_NODE -> mp.cpu_count()
@@ -230,7 +252,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # Build data_chunks from the pre-computed decomp_indices / decomp_ll_limits
     # passed in from landgen.py via land_type.py.  These were produced by
     # set_decomp_cell_idx_ll_limits(), which computes tight vertex bounding boxes
-    # per chunk — exactly the ll_limits that regrid_to_landgen_grid needs so the
+    # per chunk — exactly the ll_limits that write_latlon_to_geotiff needs so the
     # raster slice fully covers every polygon in the chunk.
     data_chunks = []
     for cell_ids, ll in zip(decomp_indices, decomp_ll_limits):
@@ -256,7 +278,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     with fork_ctx.Pool(
             processes=omp_threads_int,
             initializer=_worker_init,
-            initargs=(global_mesh_df, cellid_to_idx, com_config_dict,
+            initargs=(out_grid_data, cellid_to_idx, com_config_dict,
                       harvest_data, grazing_data, grazing_names)) as pool:
         done_count = 0
         for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
