@@ -7,6 +7,7 @@ import multiprocessing as mp
 import logging
 from pathlib import Path
 from . import shared_data
+from .shared_data import LtData
 from . import landgen_io
 from . import tools
 # import normalize_cell # not created yet
@@ -85,7 +86,7 @@ def _management_process_star(args):
 def management_process(year, ll_limits, cell_ids):
     """Compute regridded harvest/grazing for one spatial chunk.
     Data comes from worker globals (set once via initializer, not per task).
-    Returns (row_indices, harvest_results, grazing_results) — no proxy access.
+    Returns chunk LtData object with cell_idx, harvest_frac, and grazing_frac populated.
     """
     try:
         return _management_process_impl(
@@ -102,8 +103,8 @@ def _management_process_impl(year, grazing_names,
                     com_config_dict, ll_limits, cell_ids,
                     global_mesh_df, cellid_to_idx,
                     harvest_data, grazing_data):
-    """Pure-compute worker: reads source data, regrids, and returns arrays.
-    No manager proxies, no locks — all writes happen in the main process.
+    """Pure-compute worker: reads source data, regrids, and returns chunk LtData.
+    No manager proxies, no locks — all writes happen in the main process via copy_from.
     """
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
@@ -117,10 +118,16 @@ def _management_process_impl(year, grazing_names,
     # convert HEALPix cell_ids to positional row indices into lt_year_data arrays
     row_indices = np.array([cellid_to_idx[int(cid)] for cid in cell_ids], dtype=np.int64)
 
-    # --- regrid harvest variables ---
-    harvest_results = []
+    # Create chunk-sized LtData object
+    n_chunk_cells = len(cell_ids)
+    n_harvest = len(LUH2_HARVEST_VARS)
+    n_grazing = len(grazing_names)
+    
+    chunk_lt_data = LtData()
+    chunk_lt_data.allocate(n_cells=n_chunk_cells, n_harvest=n_harvest, n_grazing=n_grazing)
+    chunk_lt_data.cell_idx = row_indices  # Map chunk positions to global indices
 
-    # --- regrid and store harvest variables into lt_year_data.harvest_frac ---
+    # --- regrid harvest variables ---
     # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
     #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
     # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
@@ -135,31 +142,31 @@ def _management_process_impl(year, grazing_names,
             tmp_dir / varname,
             varname,
         )
-        harvest_results.append((i, regridded))
+        chunk_lt_data.harvest_frac[:, i] = regridded
 
     # --- regrid grazing variables ---
     # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
     # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
     # area to convert to a dimensionless fraction (0-1).
-    # Calculate cell area once (constant for all HEALPix cells)
     cell_area_km2 = landgen_io.get_cell_area_km2(global_mesh_df)
 
-    grazing_results = []
-    for i, category in enumerate(grazing_names.keys()):
+    # Use stems as keys (e.g., 'pasture' not 'pasture.nc') to match grazing_data dict
+    grazing_stems = [Path(name).stem for name in grazing_names.keys()]
+    for i, stem in enumerate(grazing_stems):
         regridded = landgen_io.regrid_to_landgen_grid(
-            grazing_data[category][category],
-            grazing_data[category]['lat'],
-            grazing_data[category]['lon'],
+            grazing_data[stem][stem],
+            grazing_data[stem]['lat'],
+            grazing_data[stem]['lon'],
             cell_ids, ll_limits,
             global_mesh_df,
-            tmp_dir / category,
-            category,
+            tmp_dir / stem,
+            stem,
         )
         regridded = regridded / cell_area_km2  # km² → fraction
         np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
-        grazing_results.append((i, regridded))
+        chunk_lt_data.grazing_frac[:, i] = regridded
 
-    return row_indices, harvest_results, grazing_results
+    return chunk_lt_data
 
 
 ########## run()
@@ -243,8 +250,8 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     #         per-task pickling of large data, no expensive Python re-import overhead.
     # - initializer: sets plain numpy/dict globals BEFORE any task runs, so no
     #         manager proxy objects are ever present in the forked workers.
-    # - Workers return results; the main process writes to lt_year_data — no proxy
-    #         connections from worker processes, so no manager deadlock.
+    # - Workers return chunk LtData objects; the main process merges them into
+    #         lt_year_data using copy_from() — no proxy connections from workers.
     fork_ctx = mp.get_context('fork')
     with fork_ctx.Pool(
             processes=omp_threads_int,
@@ -252,14 +259,11 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
             initargs=(global_mesh_df, cellid_to_idx, com_config_dict,
                       harvest_data, grazing_data, grazing_names)) as pool:
         done_count = 0
-        for row_indices, harvest_results, grazing_results in pool.imap_unordered(
-                _management_process_star, data_chunks):
-            for i, regridded in harvest_results:
-                lt_year_data.set_harvest_frac(row_indices, i, regridded)
-            for i, regridded in grazing_results:
-                lt_year_data.set_grazing_frac(row_indices, i, regridded)
+        for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
+            # Merge chunk results into global lt_year_data using copy_from
+            lt_year_data.copy_from(chunk_lt_data, ['harvest_frac', 'grazing_frac'])
             done_count += 1
             if done_count % 50 == 0 or done_count == n_chunks:
-                print(f"  Managementprogress: {done_count}/{n_chunks} chunks done", flush=True)
+                print(f"  Management progress: {done_count}/{n_chunks} chunks done", flush=True)
 
     return
