@@ -53,22 +53,20 @@ LUH2_HARVEST_VARS = [
 ## across all workers — no re-import overhead, no per-task pickling of large data.
 ## IMPORTANT: no manager proxy objects here — those cause deadlocks when forked.
 _g_out_grid_data   = None
-_g_cellid_to_idx   = None
 _g_com_config_dict = None
 _g_harvest_data    = None
 _g_grazing_data    = None
 _g_grazing_names   = None
 
-def _worker_init(out_grid_data, cellid_to_idx, com_config_dict,
+def _worker_init(out_grid_data, com_config_dict,
                  harvest_data, grazing_data, grazing_names):
     """Pool initializer: store read-only data as process-local globals.
     Called once per worker at pool startup (not once per task).
     All objects are plain Python/numpy — no manager proxies.
     """
-    global _g_out_grid_data, _g_cellid_to_idx, _g_com_config_dict
+    global _g_out_grid_data, _g_com_config_dict
     global _g_harvest_data, _g_grazing_data, _g_grazing_names
     _g_out_grid_data   = out_grid_data
-    _g_cellid_to_idx   = cellid_to_idx
     _g_com_config_dict = com_config_dict
     _g_harvest_data    = harvest_data
     _g_grazing_data    = grazing_data
@@ -83,7 +81,7 @@ def _management_process_star(args):
     print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
     return result
 
-def management_process(year, ll_limits, cell_ids):
+def management_process(year, ll_limits, row_indices):
     """Compute regridded harvest/grazing for one spatial chunk.
     Data comes from worker globals (set once via initializer, not per task).
     Returns chunk LtData object with cell_idx, harvest_frac, and grazing_frac populated.
@@ -91,8 +89,8 @@ def management_process(year, ll_limits, cell_ids):
     try:
         return _management_process_impl(
             year, _g_grazing_names,
-            _g_com_config_dict, ll_limits, cell_ids,
-            _g_out_grid_data, _g_cellid_to_idx,
+            _g_com_config_dict, ll_limits, row_indices,
+            _g_out_grid_data,
             _g_harvest_data, _g_grazing_data,
         )
     except Exception:
@@ -100,8 +98,8 @@ def management_process(year, ll_limits, cell_ids):
         raise
 
 def _management_process_impl(year, grazing_names,
-                    com_config_dict, ll_limits, cell_ids,
-                    out_grid_data, cellid_to_idx,
+                    com_config_dict, ll_limits, row_indices,
+                    out_grid_data,
                     harvest_data, grazing_data):
     """Pure-compute worker: reads source data, regrids using modular workflow, returns chunk LtData.
     No manager proxies, no locks — all writes happen in the main process via copy_from.
@@ -117,11 +115,8 @@ def _management_process_impl(year, grazing_names,
     )
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    # convert HEALPix cell_ids to positional row indices into out_grid_data arrays
-    row_indices = np.array([cellid_to_idx[int(cid)] for cid in cell_ids], dtype=np.int64)
-
     # Create chunk-sized LtData object
-    n_chunk_cells = len(cell_ids)
+    n_chunk_cells = len(row_indices)
     n_harvest = len(LUH2_HARVEST_VARS)
     n_grazing = len(grazing_names)
     
@@ -213,9 +208,20 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
         stem = Path(grazing_name).stem
         grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem])
 
-    # build a mapping from HEALPix cellid -> positional row index in lt_year_data arrays
-    # Note: out_grid_data.cell_id order must match global_mesh_df (parquet) order
-    cellid_to_idx = {int(cid): idx for idx, cid in enumerate(out_grid_data.cell_id)}
+    # Check if out_grid_data.cell_id is already sorted (true for typical HEALPix meshes).
+    # If sorted, we can use searchsorted directly; otherwise, we need to sort first.
+    # Note: out_grid_data.cell_id order comes from the mesh NetCDF/parquet row order.
+    cellids = out_grid_data.cell_id
+    is_sorted = np.all(cellids[:-1] <= cellids[1:])
+    
+    if is_sorted:
+        # Already sorted - use directly
+        sorted_cellids = cellids
+        sorted_indices = np.arange(len(cellids), dtype=np.intp)
+    else:
+        # Need to sort for searchsorted
+        sorted_indices = np.argsort(cellids)
+        sorted_cellids = cellids[sorted_indices]
 
     # Determine the number of worker processes to use.
     # Priority: SRUN_CPUS_PER_TASK -> SLURM_CPUS_PER_TASK -> SLURM_CPUS_ON_NODE -> mp.cpu_count()
@@ -253,11 +259,16 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # set_decomp_cell_idx_ll_limits(), which computes tight vertex bounding boxes
     # per chunk — exactly the ll_limits that write_latlon_to_geotiff needs so the
     # raster slice fully covers every polygon in the chunk.
+    # Convert cell_ids to row_indices using vectorized searchsorted on sorted cellids.
     data_chunks = []
     for cell_ids, ll in zip(decomp_indices, decomp_ll_limits):
         if len(cell_ids) == 0:
             continue  # skip empty (ocean-only) chunks
-        data_chunks.append((year, ll, cell_ids))
+        # Vectorized conversion: cellid -> row_index via searchsorted
+        chunk_cellids = np.array(cell_ids, dtype=np.int64)
+        positions_in_sorted = np.searchsorted(sorted_cellids, chunk_cellids)
+        row_indices = sorted_indices[positions_in_sorted]
+        data_chunks.append((year, ll, row_indices))
 
     # Sort largest chunks first (most cells = slowest) so they are dispatched
     # immediately and don't create a long tail at the end of the job.
@@ -277,7 +288,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     with fork_ctx.Pool(
             processes=omp_threads_int,
             initializer=_worker_init,
-            initargs=(out_grid_data, cellid_to_idx, com_config_dict,
+            initargs=(out_grid_data, com_config_dict,
                       harvest_data, grazing_data, grazing_names)) as pool:
         done_count = 0
         for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
