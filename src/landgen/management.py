@@ -11,7 +11,6 @@ from .shared_data import LtData
 from . import landgen_io
 from . import tools
 # import normalize_cell # not created yet
-import pandas as pd
 import numpy as np
 import os
 import traceback

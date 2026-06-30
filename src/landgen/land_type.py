@@ -140,14 +140,8 @@ def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_
     # set up the land_type module shared data structure
     # this holds only one year of data, so write it each year
     lt_year_data = LtData()
-    # get the actual number of land cells from the HEALPix parquet mesh file
-    global_parquet_path = (
-        Path(com_config_dict['source_data_path'])
-        / Path(com_config_dict['landgen_grid_path']).parent
-        / 'merged_land_cells.parquet'
-    )
-    _mesh_df = pd.read_parquet(global_parquet_path, columns=['cellid'])
-    n_cells = len(_mesh_df)
+    # get the actual number of land cells from out_grid_data
+    n_cells = out_grid_data.num_cells
     print(f"  Allocating LtData for {n_cells} land cells")
     lt_year_data.allocate(n_cells=n_cells)
 
