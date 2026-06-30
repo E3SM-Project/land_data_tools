@@ -6,7 +6,6 @@
 import multiprocessing as mp
 import logging
 from pathlib import Path
-from . import shared_data
 from .shared_data import LtData
 from . import landgen_io
 from . import tools
@@ -169,7 +168,7 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
 ## this sets up the pool and calls the management_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager):
+        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits):
 
     print(f"Processing management module with parameters:")
     # todo: print the parameters here

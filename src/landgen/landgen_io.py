@@ -10,7 +10,6 @@ logger = logging.getLogger('landgen')
 import rasterio
 from rasterio.transform import from_bounds
 import json
-import shapely.wkb
 from uraster.classes.uraster import uraster as URaster
 import earthaccess
 import glob

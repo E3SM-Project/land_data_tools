@@ -5,11 +5,9 @@
 
 # run() function is the main entry point for this module, and will be called by landgen.py
 
-import multiprocessing as mp
 import importlib
 import logging
 from pathlib import Path
-from . import shared_data
 from .shared_data import LtData
 import numpy as np
 from . import landgen_io
@@ -91,7 +89,7 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
         # Process harvest/grazing data - adjust harvest/grazing area
         management = importlib.import_module('landgen.management')
         lc_data = management.run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
-                        grazing_names, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits, manager)
+                        grazing_names, com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits)
 
     # Normalize cell
     #normalize_cell = importlib.import_module('landgen.normalize_cell')
@@ -179,9 +177,15 @@ def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_
         # todo: can write each year, then combine at end in proper order 
 
         # set timevars in shared_data for each data class
-        # for now:
-        varnames = ['pct_pft', 'pct_ocean']
-        timevars = ['pct_pft']
+        # Variables to write to output NetCDF:
+        #   pct_pft: landcover percentages [n_cells, n_pfts]
+        #   pct_ocean: ocean percentage [n_cells]
+        #   harvest_frac: harvest fractions from LUH2 [n_cells, n_harvest=10]
+        #   grazing_frac: grazing fractions from HYDE3.5 [n_cells, n_grazing=2]
+        # Variables with time dimension (for annual concatenation with ncrcat):
+        #   All of the above vary by year
+        varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'grazing_frac']
+        timevars = ['pct_pft', 'harvest_frac', 'grazing_frac']
 
         # insert _<year> before the extension (or at the end if no extension)
         out_fname_p = Path(out_fname)
