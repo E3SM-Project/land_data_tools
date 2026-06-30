@@ -48,61 +48,29 @@ LUH2_HARVEST_VARS = [
 
 ## output
 
-## module-level globals set once per worker process via pool initializer.
-## Using fork + initializer means these large arrays are copy-on-write shared
-## across all workers — no re-import overhead, no per-task pickling of large data.
-## IMPORTANT: no manager proxy objects here — those cause deadlocks when forked.
-_g_out_grid_data   = None
-_g_com_config_dict = None
-_g_harvest_data    = None
-_g_grazing_data    = None
-_g_grazing_names   = None
-
-def _worker_init(out_grid_data, com_config_dict,
-                 harvest_data, grazing_data, grazing_names):
-    """Pool initializer: store read-only data as process-local globals.
-    Called once per worker at pool startup (not once per task).
-    All objects are plain Python/numpy — no manager proxies.
-    """
-    global _g_out_grid_data, _g_com_config_dict
-    global _g_harvest_data, _g_grazing_data, _g_grazing_names
-    _g_out_grid_data   = out_grid_data
-    _g_com_config_dict = com_config_dict
-    _g_harvest_data    = harvest_data
-    _g_grazing_data    = grazing_data
-    _g_grazing_names   = grazing_names
-
-def _management_process_star(args):
-    """Unpack tuple args for pool.imap_unordered (lambdas can't be pickled)."""
-    t0 = time.time()
-    result = management_process(*args)
-    elapsed = time.time() - t0
-    year, ll_limits, _ = args
-    print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
-    return result
-
-def management_process(year, ll_limits, row_indices):
+def management_process(year, harvest_path, harvest_name, grazing_path, grazing_names,
+                      com_config_dict, out_grid_data, ll_limits, row_indices):
     """Compute regridded harvest/grazing for one spatial chunk.
-    Data comes from worker globals (set once via initializer, not per task).
+    Each worker reads its own source data (simple starmap approach like landcover.py).
     Returns chunk LtData object with cell_idx, harvest_frac, and grazing_frac populated.
     """
+    t0 = time.time()
     try:
         return _management_process_impl(
-            year, _g_grazing_names,
-            _g_com_config_dict, ll_limits, row_indices,
-            _g_out_grid_data,
-            _g_harvest_data, _g_grazing_data,
+            year, harvest_path, harvest_name, grazing_path, grazing_names,
+            com_config_dict, ll_limits, row_indices, out_grid_data
         )
     except Exception:
         print(f"ERROR in management_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
         raise
+    finally:
+        elapsed = time.time() - t0
+        print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
 
-def _management_process_impl(year, grazing_names,
-                    com_config_dict, ll_limits, row_indices,
-                    out_grid_data,
-                    harvest_data, grazing_data):
-    """Pure-compute worker: reads source data, regrids using modular workflow, returns chunk LtData.
-    No manager proxies, no locks — all writes happen in the main process via copy_from.
+def _management_process_impl(year, harvest_path, harvest_name, grazing_path, grazing_names,
+                             com_config_dict, ll_limits, row_indices, out_grid_data):
+    """Worker implementation: reads source data, regrids using modular workflow, returns chunk LtData.
+    Each worker does its own I/O (simple starmap approach like landcover.py).
     Uses same workflow as landcover.py: write mesh once, then regrid each variable.
     """
 
@@ -114,6 +82,13 @@ def _management_process_impl(year, grazing_names,
         / f"management_{year}_{min_lat:.0f}_{min_lon:.0f}"
     )
     tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Read source data (each worker reads its own copy)
+    harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS, ll_limits)
+    grazing_data = {}
+    for grazing_name in grazing_names.keys():
+        stem = Path(grazing_name).stem
+        grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem], ll_limits)
 
     # Create chunk-sized LtData object
     n_chunk_cells = len(row_indices)
@@ -199,17 +174,8 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     print(f"Processing management module with parameters:")
     # todo: print the parameters here
 
-    # read source data once here — workers reuse via initializer globals
-    print(f"  Reading LUH2 harvest data for year {year}...")
-    harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS)
-    print(f"  Reading HYDE grazing data for year {year}...")
-    grazing_data = {}
-    for i, grazing_name in enumerate(grazing_names.keys()):
-        stem = Path(grazing_name).stem
-        grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem])
-
+    # Build cellid -> row_index mapping once for all chunks.
     # Check if out_grid_data.cell_id is already sorted (true for typical HEALPix meshes).
-    # If sorted, we can use searchsorted directly; otherwise, we need to sort first.
     # Note: out_grid_data.cell_id order comes from the mesh NetCDF/parquet row order.
     cellids = out_grid_data.cell_id
     is_sorted = np.all(cellids[:-1] <= cellids[1:])
@@ -242,18 +208,6 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     else:
         logger.info(f"Running locally: using {omp_threads_int} workers (mp.cpu_count())")
 
-    # set up the pool and call the management_process() function for each chunk of data
-    # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
-    #    these are created in land_type.process_single_year() and passed to this run() function as lists?
-    # there are more chunks than cpus; the pool will manage this for efficiency because chunks vary in size
-    # the results will be stored directly in the lt_year_data shared structure
-
-    # get the manager locks for the shared data structures
-    # using data-specific locks, watch out for deadlocks.  
-    man_lock  = manager.Lock()
-    #grid_lock = grid_manager.lock()
-
-
     # Build data_chunks from the pre-computed decomp_indices / decomp_ll_limits
     # passed in from landgen.py via land_type.py.  These were produced by
     # set_decomp_cell_idx_ll_limits(), which computes tight vertex bounding boxes
@@ -268,34 +222,27 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
         chunk_cellids = np.array(cell_ids, dtype=np.int64)
         positions_in_sorted = np.searchsorted(sorted_cellids, chunk_cellids)
         row_indices = sorted_indices[positions_in_sorted]
-        data_chunks.append((year, ll, row_indices))
+        # Each tuple contains all args for management_process (starmap approach)
+        data_chunks.append((
+            year, harvest_path, harvest_name, grazing_path, grazing_names,
+            com_config_dict, out_grid_data, ll, row_indices
+        ))
 
     # Sort largest chunks first (most cells = slowest) so they are dispatched
     # immediately and don't create a long tail at the end of the job.
-    data_chunks.sort(key=lambda t: len(t[2]), reverse=True)
+    data_chunks.sort(key=lambda t: len(t[8]), reverse=True)  # row_indices is at index 8
 
     n_chunks = len(data_chunks)
     print(f"  Submitting {n_chunks} management chunks to pool of {omp_threads_int} workers")
 
-    # Use fork-based Pool with an initializer that sets worker globals once at startup.
-    # - fork: workers inherit parent memory (numpy arrays are copy-on-write) — no
-    #         per-task pickling of large data, no expensive Python re-import overhead.
-    # - initializer: sets plain numpy/dict globals BEFORE any task runs, so no
-    #         manager proxy objects are ever present in the forked workers.
-    # - Workers return chunk LtData objects; the main process merges them into
-    #         lt_year_data using copy_from() — no proxy connections from workers.
-    fork_ctx = mp.get_context('fork')
-    with fork_ctx.Pool(
-            processes=omp_threads_int,
-            initializer=_worker_init,
-            initargs=(out_grid_data, com_config_dict,
-                      harvest_data, grazing_data, grazing_names)) as pool:
-        done_count = 0
-        for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
-            # Merge chunk results into global lt_year_data using copy_from
-            lt_year_data.copy_from(chunk_lt_data, ['harvest_frac', 'grazing_frac'])
-            done_count += 1
-            if done_count % 50 == 0 or done_count == n_chunks:
-                print(f"  Management progress: {done_count}/{n_chunks} chunks done", flush=True)
+    # Use simple Pool.starmap() approach (like landcover.py).
+    # Workers read their own data — simpler code, more portable.
+    # Trade-off: more I/O per chunk vs simpler implementation.
+    with mp.Pool(processes=omp_threads_int) as pool:
+        chunk_list_results = pool.starmap(management_process, data_chunks)
+
+    # Merge chunk results into global lt_year_data using copy_from
+    for chunk_lt_data in chunk_list_results:
+        lt_year_data.copy_from(chunk_lt_data, ['harvest_frac', 'grazing_frac'])
 
     return
