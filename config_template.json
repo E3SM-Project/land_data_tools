@@ -25,7 +25,7 @@
           "lake": false,
           "ice": false,
           "wetland": false,
-          "harvest": false,
+          "management": false,
           "veg_assoc": false
         },
         "submod_dyn": {
@@ -35,7 +35,7 @@
           "lake": false,
           "ice": false,
           "wetland": false,
-          "harvest": true,
+          "management": true,
           "veg_assoc": false
         },
         "out_fname": "landgen_land_type.nc",

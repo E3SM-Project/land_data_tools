@@ -147,9 +147,9 @@ def _management_process_impl(year, grazing_names,
     grazing_results = []
     for i, category in enumerate(grazing_names.keys()):
         regridded = landgen_io.regrid_to_landgen_grid(
-            grazing_data[category],
-            grazing_data['lat'],
-            grazing_data['lon'],
+            grazing_data[category][category],
+            grazing_data[category]['lat'],
+            grazing_data[category]['lon'],
             cell_ids, ll_limits,
             global_mesh_df,
             tmp_dir / category,
@@ -179,9 +179,12 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
 
     # read source data once here — workers reuse via initializer globals
     print(f"  Reading LUH2 harvest data for year {year}...")
-    harvest_data = landgen_io.read_luh2_harvest(year, harvest_path, harvest_name)
+    harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS)
     print(f"  Reading HYDE grazing data for year {year}...")
-    grazing_data = landgen_io.read_hyde_grazing(year, grazing_path, grazing_names)
+    grazing_data = {}
+    for i, grazing_name in enumerate(grazing_names.keys()):
+        stem = Path(grazing_name).stem
+        grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem])
 
     # build a mapping from HEALPix cellid -> positional row index in lt_year_data arrays
     cellid_to_idx = landgen_io.build_cellid_to_idx_map(global_mesh_df)
