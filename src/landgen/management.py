@@ -173,21 +173,6 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     print(f"Processing management module with parameters:")
     # todo: print the parameters here
 
-    # Build cellid -> row_index mapping once for all chunks.
-    # Check if out_grid_data.cell_id is already sorted (true for typical HEALPix meshes).
-    # Note: out_grid_data.cell_id order comes from the mesh NetCDF/parquet row order.
-    cellids = out_grid_data.cell_id
-    is_sorted = np.all(cellids[:-1] <= cellids[1:])
-    
-    if is_sorted:
-        # Already sorted - use directly
-        sorted_cellids = cellids
-        sorted_indices = np.arange(len(cellids), dtype=np.intp)
-    else:
-        # Need to sort for searchsorted
-        sorted_indices = np.argsort(cellids)
-        sorted_cellids = cellids[sorted_indices]
-
     # Determine the number of worker processes to use.
     # Priority: SRUN_CPUS_PER_TASK -> SLURM_CPUS_PER_TASK -> SLURM_CPUS_ON_NODE -> mp.cpu_count()
     in_slurm = os.environ.get('SLURM_JOB_ID') is not None
@@ -212,15 +197,17 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # set_decomp_cell_idx_ll_limits(), which computes tight vertex bounding boxes
     # per chunk — exactly the ll_limits that write_latlon_to_geotiff needs so the
     # raster slice fully covers every polygon in the chunk.
-    # Convert cell_ids to row_indices using vectorized searchsorted on sorted cellids.
+    #
+    # ASSUMPTION: decomp_indices contains 0-based row indices into out_grid_data arrays
+    # (not arbitrary cell ID values). This requires that the mesh file's cellid values
+    # are sequential (0, 1, 2, ..., n-1) matching their row positions. If cellid values
+    # are non-sequential or non-contiguous after subsetting, array indexing operations
+    # (e.g., out_grid_data.cell_id[idx], out_grid_data.lon_vtx[idx]) will produce
+    # incorrect results or index-out-of-bounds errors.
     data_chunks = []
-    for cell_ids, ll in zip(decomp_indices, decomp_ll_limits):
-        if len(cell_ids) == 0:
+    for row_indices, ll in zip(decomp_indices, decomp_ll_limits):
+        if len(row_indices) == 0:
             continue  # skip empty (ocean-only) chunks
-        # Vectorized conversion: cellid -> row_index via searchsorted
-        chunk_cellids = np.array(cell_ids, dtype=np.int64)
-        positions_in_sorted = np.searchsorted(sorted_cellids, chunk_cellids)
-        row_indices = sorted_indices[positions_in_sorted]
         # Each tuple contains all args for management_process (starmap approach)
         data_chunks.append((
             year, harvest_path, harvest_name, grazing_path, grazing_names,
