@@ -85,8 +85,7 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     # Read source data (each worker reads its own copy)
     harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS, ll_limits)
     grazing_data = {}
-    for grazing_name in grazing_names.keys():
-        stem = Path(grazing_name).stem
+    for stem, grazing_name in grazing_names.items():
         grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem], ll_limits)
 
     # Create chunk-sized LtData object

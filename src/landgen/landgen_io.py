@@ -63,7 +63,6 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
     lon     = ds['lon'].values.astype(np.float64)    # (n_cells,)
     xv      = ds['xv'].values.astype(np.float64)     # (n_cells, n_vertices)
     yv      = ds['yv'].values.astype(np.float64)     # (n_cells, n_vertices)
-    cellids = ds['cellid'].values.astype(np.int64)   # (n_cells,) — HEALPix cell IDs
     ds.close()
 
     decomp_indices.clear()
@@ -79,11 +78,8 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
         # tight bounding box from actual vertex extents of the cells in this chunk
         xv_chunk = xv[indices]   # (n_chunk_cells, n_vertices)
         yv_chunk = yv[indices]
+        decomp_indices.append(tuple(indices.tolist()))
 
-        # Store HEALPix cellid values (not NC row indices) so callers can use them
-        # directly as cell identifiers.  Row indices are only needed here to index
-        # into xv/yv; they are kept in the companion .npz for load_mesh_nc().
-        decomp_indices.append(tuple(cellids[indices].tolist()))
         decomp_ll_limits.append((
             float(yv_chunk.min()), float(yv_chunk.max()),
             float(xv_chunk.min()), float(xv_chunk.max()),
