@@ -29,11 +29,11 @@ except ImportError:
 
 # Grid geometry fields written by write_module_netcdf() — excluded from
 # auto-detect, except for landfrac or when explicitly requested by varnames.
-_GRID_FIELDS = frozenset({'lon_xy', 'lat_xy', 'lon_vtx', 'lat_vtx', 'cell_area'})
+_GRID_FIELDS = frozenset({'lon_cen', 'lat_cen', 'lon_vtx', 'lat_vtx', 'cell_area'})
 
 
-def _plot_one_var(ax, ds, varname, layer, year, mask, lon_xy, lat_xy,
-                  plot_type, colormap, ll_limits, _log):
+def _plot_one_var(ax, ds, varname, layer, year, mask, lon_cen, lat_cen,
+                  plot_type, colormap, ll_limits, _log, scale_limits=None):
     """Draw a single variable onto an existing Axes object."""
     da = ds[varname]
     dims = list(da.dims)
@@ -60,7 +60,10 @@ def _plot_one_var(ax, ds, varname, layer, year, mask, lon_xy, lat_xy,
 
     values = da.values.astype(np.float64)[mask]
 
-    vmin, vmax = float(np.nanmin(values)), float(np.nanmax(values))
+    if scale_limits is not None:
+        vmin, vmax = float(scale_limits[0]), float(scale_limits[1])
+    else:
+        vmin, vmax = float(np.nanmin(values)), float(np.nanmax(values))
     norm = plt.Normalize(vmin=vmin, vmax=vmax)
     cmap = plt.colormaps[colormap]
 
@@ -69,10 +72,10 @@ def _plot_one_var(ax, ds, varname, layer, year, mask, lon_xy, lat_xy,
         min_lat, max_lat, min_lon, max_lon = ll_limits
     else:
         pad = 1.0
-        min_lon = float(lon_xy.min()) - pad
-        max_lon = float(lon_xy.max()) + pad
-        min_lat = float(lat_xy.min()) - pad
-        max_lat = float(lat_xy.max()) + pad
+        min_lon = float(lon_cen.min()) - pad
+        max_lon = float(lon_cen.max()) + pad
+        min_lat = float(lat_cen.min()) - pad
+        max_lat = float(lat_cen.max()) + pad
 
     if _HAS_CARTOPY:
         ax.set_extent([min_lon, max_lon, min_lat, max_lat], crs=ccrs.PlateCarree())
@@ -89,7 +92,7 @@ def _plot_one_var(ax, ds, varname, layer, year, mask, lon_xy, lat_xy,
     geo_kw = {'transform': ccrs.PlateCarree()} if _HAS_CARTOPY else {}
 
     if plot_type == 'scatter':
-        mappable = ax.scatter(lon_xy, lat_xy, c=values, cmap=cmap, norm=norm,
+        mappable = ax.scatter(lon_cen, lat_cen, c=values, cmap=cmap, norm=norm,
                               s=1, linewidths=0, **geo_kw)
     else:  # 'rendered'
         lon_vtx = ds['lon_vtx'].values[mask]
@@ -137,7 +140,7 @@ def _layers_for_var(vname, layers):
 
 def plot_module_netcdf(file_path, out_path, year, varnames=None, layers=None,
                        plot_type='scatter', file_type='png',
-                       colormap='viridis', ll_limits=None):
+                       colormap='viridis', ll_limits=None, scale_limits=None):
     """Plot one or more variables from a NetCDF file written by landgen."""
     _log = logging.getLogger('landgen')
 
@@ -191,17 +194,17 @@ def plot_module_netcdf(file_path, out_path, year, varnames=None, layers=None,
                 raise ValueError(msg)
             break
 
-    lon_xy = ds['lon_xy'].values
-    lat_xy = ds['lat_xy'].values
+    lon_cen = ds['lon_cen'].values
+    lat_cen = ds['lat_cen'].values
 
     if ll_limits is not None:
         min_lat, max_lat, min_lon, max_lon = ll_limits
         mask = (
-            (lat_xy >= min_lat) & (lat_xy <= max_lat) &
-            (lon_xy >= min_lon) & (lon_xy <= max_lon)
+            (lat_cen >= min_lat) & (lat_cen <= max_lat) &
+            (lon_cen >= min_lon) & (lon_cen <= max_lon)
         )
     else:
-        mask = np.ones(len(lon_xy), dtype=bool)
+        mask = np.ones(len(lon_cen), dtype=bool)
 
     if not mask.any():
         ds.close()
@@ -209,8 +212,8 @@ def plot_module_netcdf(file_path, out_path, year, varnames=None, layers=None,
         _log.error(msg)
         raise ValueError(msg)
 
-    lon_xy = lon_xy[mask]
-    lat_xy = lat_xy[mask]
+    lon_cen = lon_cen[mask]
+    lat_cen = lat_cen[mask]
 
     out_files = []
     for vname in varnames:
@@ -224,14 +227,14 @@ def plot_module_netcdf(file_path, out_path, year, varnames=None, layers=None,
                 fig, ax = plt.subplots(figsize=(12, 6))
             try:
                 mappable = _plot_one_var(ax, ds, vname, layer_idx, year, mask,
-                                         lon_xy, lat_xy, plot_type, colormap,
-                                         ll_limits, _log)
+                                         lon_cen, lat_cen, plot_type, colormap,
+                                         ll_limits, _log, scale_limits=scale_limits)
                 fig.colorbar(mappable, ax=ax, label=vname)
                 if is_multilayer:
                     out_file = out_path / f"{file_path.stem}_{vname}_layer{layer_idx}_{year}.png"
                 else:
                     out_file = out_path / f"{file_path.stem}_{vname}_{year}.png"
-                fig.savefig(out_file, dpi=150, bbox_inches='tight')
+                fig.savefig(out_file, dpi=300, bbox_inches='tight')
                 out_files.append(out_file)
                 _log.info(f"plot_module_netcdf: wrote {out_file}")
             except Exception as e:
@@ -285,6 +288,8 @@ def main(argv=None):
     parser.add_argument('--colormap', default='viridis', help="Colormap for plots; default='viridis'")
     parser.add_argument('--ll-limits', nargs=4, type=float, metavar=('MIN_LAT', 'MAX_LAT', 'MIN_LON', 'MAX_LON'),
                         default=None, help="Latitude and longitude limits for plots; default=None uses full extent")
+    parser.add_argument('--scale-limits', nargs=2, type=float, metavar=('VMIN', 'VMAX'),
+                        default=None, help="Colorscale min and max; default=None uses data min/max")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -305,6 +310,7 @@ def main(argv=None):
         file_type=args.file_type,
         colormap=args.colormap,
         ll_limits=tuple(args.ll_limits) if args.ll_limits is not None else None,
+        scale_limits=tuple(args.scale_limits) if args.scale_limits is not None else None,
     )
 
     print(result)

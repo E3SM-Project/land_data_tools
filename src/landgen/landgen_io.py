@@ -2,6 +2,7 @@
 # Utility functions for reading harvest data from LUH2 and grazing data from HYDE3.5
 
 import logging
+import time
 import xarray as xr
 import numpy as np
 from pathlib import Path
@@ -21,14 +22,32 @@ from osgeo import gdal
 
 
 #--------------------------------------------------------------------------
-def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits,
+def _earthaccess_search_with_retry(max_retries=3, delay_sec=10, **kwargs):
+    """Call earthaccess.search_data with retries on transient server errors (HTTP 5xx)."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            return earthaccess.search_data(**kwargs)
+        except (RuntimeError, Exception) as exc:
+            msg = str(exc)
+            if attempt < max_retries and ('500' in msg or 'Internal Error' in msg or 'Server Error' in msg):
+                logger.warning(
+                    f"_earthaccess_search_with_retry: attempt {attempt}/{max_retries} failed "
+                    f"({msg!r}); retrying in {delay_sec}s"
+                )
+                time.sleep(delay_sec)
+            else:
+                raise
+
+
+#--------------------------------------------------------------------------
+def set_decomp_cell_idx_ll_limits(grid_data, decomp_indices, decomp_ll_limits,
                               chunk_size_degrees=10, out_dir=None):
     """
-    Populate chunk_indices and chunk_ll_limits in-place from the domain NetCDF.
+    Populate chunk_indices and chunk_ll_limits in-place from a GridData structure.
     Also write a companion .npz file mapping chunk lat-lon limits to cell indices.
 
     Approx. cell-centre lat/lon assigns each cell to a chunk box.  Vertex coordinates
-    xv/yv determine the tight actual bounding box of the cells in that chunk,
+    lon_vtx/lat_vtx determine the tight actual bounding box of the cells in that chunk,
     which is what callers (e.g. write_latlon_to_geotiff) need for source-data
     slicing — the fixed chunk box may extend into ocean where no source data exist.
 
@@ -38,9 +57,9 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
     Based on HealPix mesh, but any mesh with the same variables in the same format should work.
 
     Args:
-        nc_path_name (str|Path):      Path (and name) to the domain NetCDF file containing
-                                 'lat', 'lon' (~ cell centres), 'xv', 'yv'
-                                 (vertex coordinates, shape n_cells x n_vertices).
+        grid_data (GridData):    GridData object with lat_cen, lon_cen (~ cell centres)
+                                 and lat_vtx, lon_vtx (vertex coordinates,
+                                 shape n_cells x n_vertices) already populated.
         chunk_indices (list):    Output — populated in-place.  Each element is a
                                  1D tuple of HEALPix cellid values (int64)
                                  identifying the cells in that chunk.
@@ -49,21 +68,15 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
                                  tight vertex bounding box for that chunk's cells.
                                  Matched by position to chunk_indices.
         chunk_size_degrees (int): Size of the decomposition boxes in degrees.
-        out_dir (str|Path|None): Directory to write the companion .spatial_index.npz file.
-                                 If None, the file is written alongside nc_path_name.
+        out_dir (str|Path):      Directory to write the companion .spatial_index.npz file.
     """
-    nc_path = Path(nc_path_name)
-    if not nc_path.exists():
-        raise FileNotFoundError(f"set_decomp_cell_idx_ll_limits: Mesh NetCDF file not found: {nc_path}")
+    if out_dir is None:
+        raise ValueError("set_decomp_cell_idx_ll_limits: out_dir is required")
 
-    # read the full file once — this is a one-time setup call
-    # note that lat and lon are approximate cell centers
-    ds      = xr.open_dataset(nc_path, decode_times=False)
-    lat     = ds['lat'].values.astype(np.float64)    # (n_cells,)
-    lon     = ds['lon'].values.astype(np.float64)    # (n_cells,)
-    xv      = ds['xv'].values.astype(np.float64)     # (n_cells, n_vertices)
-    yv      = ds['yv'].values.astype(np.float64)     # (n_cells, n_vertices)
-    ds.close()
+    lat = grid_data.lat_cen.astype(np.float64)   # (n_cells,)
+    lon = grid_data.lon_cen.astype(np.float64)   # (n_cells,)
+    lon_v  = grid_data.lon_vtx.astype(np.float64)  # (n_cells, n_vertices)
+    lat_v  = grid_data.lat_vtx.astype(np.float64)  # (n_cells, n_vertices)
 
     decomp_indices.clear()
     decomp_ll_limits.clear()
@@ -76,13 +89,12 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
             continue  # skip ocean-only boxes
 
         # tight bounding box from actual vertex extents of the cells in this chunk
-        xv_chunk = xv[indices]   # (n_chunk_cells, n_vertices)
-        yv_chunk = yv[indices]
+        lon_v_chunk = lon_v[indices]   # (n_chunk_cells, n_vertices)
+        lat_v_chunk = lat_v[indices]
         decomp_indices.append(tuple(indices.tolist()))
-
         decomp_ll_limits.append((
-            float(yv_chunk.min()), float(yv_chunk.max()),
-            float(xv_chunk.min()), float(xv_chunk.max()),
+            float(lat_v_chunk.min()), float(lat_v_chunk.max()),
+            float(lon_v_chunk.min()), float(lon_v_chunk.max()),
         ))
 
         # companion file stores NC row indices (used by load_mesh_nc via ds.isel())
@@ -90,16 +102,12 @@ def set_decomp_cell_idx_ll_limits(nc_path_name, decomp_indices, decomp_ll_limits
         index[key] = indices
 
     # write companion file
-    index_name = Path(nc_path).stem + '.spatial_index.npz'
-    if out_dir is not None:
-        out_path = Path(out_dir) / index_name
-    else:
-        out_path = Path(nc_path).parent / index_name
+    out_path = Path(out_dir) / 'spatial_index.npz'
     np.savez_compressed(out_path, **index)
     
-    logger.info(f"set_decomp_cell_idx_ll_limits: built {len(decomp_indices)} chunks from {nc_path}")
+    logger.info(f"set_decomp_cell_idx_ll_limits: built {len(decomp_indices)} chunks")
     logger.info(f"set_decomp_cell_idx_ll_limits: chunks include {sum(len(t) for t in decomp_indices)} cells")
-    logger.info(f"set_decomp_cell_idx_ll_limits: check against total cells in {nc_path} to ensure all are included")
+    logger.info(f"set_decomp_cell_idx_ll_limits: check against grid_data.num_cells or netcdf file to ensure all cells are included")
     logger.info(f"set_decomp_cell_idx_ll_limits: wrote {len(index)} chunks to {out_path}")
 
     return out_path
@@ -122,7 +130,7 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
                                 created by set_decomp_cell_idx_ll_limits().
 
     Returns:
-        dict with keys 'cellid', 'xv', 'yv', 'lon', 'lat', 'area' (all np.ndarray).
+        dict with keys 'cellid', 'lon_v', 'lat_v', 'lon', 'lat', 'area' (all np.ndarray).
     """
     nc_path = Path(nc_path_name)
     if not nc_path.exists():
@@ -152,15 +160,15 @@ def load_mesh_nc(nc_path_name, indices=None, ll_limits=None):
         subset = ds
 
     cellid = subset['cellid'].values.astype(np.int64)
-    xv     = subset['xv'].values.astype(np.float64)
-    yv     = subset['yv'].values.astype(np.float64)
+    lon_v     = subset['xv'].values.astype(np.float64)
+    lat_v     = subset['yv'].values.astype(np.float64)
     lon    = subset['lon'].values.astype(np.float64)
     lat    = subset['lat'].values.astype(np.float64)
     area   = subset['area'].values.astype(np.float64)
     ds.close()
 
     logger.info(f"load_mesh_nc: loaded {len(cellid)} cells from {nc_path}")
-    return {'cellid': cellid, 'xv': xv, 'yv': yv, 'lon': lon, 'lat': lat, 'area': area}
+    return {'cellid': cellid, 'lon_v': lon_v, 'lat_v': lat_v, 'lon': lon, 'lat': lat, 'area': area}
 
 
 
@@ -289,7 +297,7 @@ def _get_modis_tile_idx(lon, lat):
 
 
 #--------------------------------------------------------------------------
-def get_modis_tile_idxs_ll(ll_limits):
+def _get_modis_tile_idxs_ll(ll_limits):
     """
     Get the MODIS tile indices for a lat/lon bounding box.
 
@@ -301,23 +309,23 @@ def get_modis_tile_idxs_ll(ll_limits):
     """
     if ll_limits is None or len(ll_limits) != 4:
         raise ValueError(
-            f"get_modis_tile_idxs_ll: ll_limits must be a 4-element (min_lat, max_lat, min_lon, max_lon), got {ll_limits}"
+            f"_get_modis_tile_idxs_ll: ll_limits must be a 4-element (min_lat, max_lat, min_lon, max_lon), got {ll_limits}"
         )
 
     min_lat, max_lat, min_lon, max_lon = [float(x) for x in ll_limits]
     if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
         raise ValueError(
-            f"get_modis_tile_idxs_ll: invalid latitude bounds {ll_limits}. "
+            f"_get_modis_tile_idxs_ll: invalid latitude bounds {ll_limits}. "
             "Expected (min_lat, max_lat, min_lon, max_lon) with lat in [-90, 90]."
         )
     if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
         raise ValueError(
-            f"get_modis_tile_idxs_ll: invalid longitude bounds {ll_limits}. "
+            f"_get_modis_tile_idxs_ll: invalid longitude bounds {ll_limits}. "
             "Expected (min_lat, max_lat, min_lon, max_lon) with lon in [-180, 180]."
         )
     if min_lat > max_lat or min_lon > max_lon:
         raise ValueError(
-            f"get_modis_tile_idxs_ll: non-monotonic bounds {ll_limits}. "
+            f"_get_modis_tile_idxs_ll: non-monotonic bounds {ll_limits}. "
             "Expected min <= max for both lat and lon."
         )
 
@@ -376,8 +384,6 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
     # user must set up a .netrc file in their home directory (~/.netrc) with their credentials on one line, e.g.:
     # machine urs.earthdata.nasa.gov login <myusername> password <mypassword>
     # and set the file permissions to user read/write only (chmod 600 ~/.netrc) to protect their credentials
-
-    from pymodis import downmodis, modis_mosaic, modis_convert  # noqa: PLC0415
 
     dir_path = Path(dir_path)
     output_dir = dir_path   # GeoTIFFs are written to the same directory as the downloaded HDF files
@@ -450,14 +456,14 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
             f"{search_kwargs['bounding_box']}"
         )
 
-    granules = earthaccess.search_data(**search_kwargs)
+    granules = _earthaccess_search_with_retry(**search_kwargs)
 
     # CMR bbox filtering can return zero granules for very small boxes even when
     # intersecting MODIS tiles exist. Retry by tile tags as a robust fallback.
     if not granules and ll_limits is not None:
         target_tiles = {
             t.strip().lower()
-            for t in get_modis_tile_idxs_ll(ll_limits).split(',')
+            for t in _get_modis_tile_idxs_ll(ll_limits).split(',')
             if t.strip()
         }
         logger.warning(
@@ -465,7 +471,7 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
             f"for tiles={sorted(target_tiles)}, {product}, "
             f"bounding_box(min_lon,min_lat,max_lon,max_lat)={search_kwargs['bounding_box']}"
         )
-        broad_granules = earthaccess.search_data(
+        broad_granules = _earthaccess_search_with_retry(
             short_name=short_name,
             version=version,
             temporal=(earliest_date, latest_date),
@@ -774,13 +780,14 @@ def write_mesh_to_geojson(out_grid_data, tmp_path, cell_indices=None):
     if idx.size == 0:
         raise ValueError("write_mesh_to_geojson: cell_indices is empty — no cells to write")
 
-    cell_ids = out_grid_data.cell_id[idx]   # (n,)
     lon_vtx  = out_grid_data.lon_vtx[idx]   # (n, n_vertices)
     lat_vtx  = out_grid_data.lat_vtx[idx]   # (n, n_vertices)
 
     features = []
     for i in range(len(idx)):
         # GeoJSON polygon ring: list of [lon, lat] pairs, closed (first == last)
+        # it is more efficient to store the cell indices than the cell ids
+        #    but i think the property still need to be called 'cellid' for uraster to recognize it
         ring = [[float(lon_vtx[i, v]), float(lat_vtx[i, v])]
                 for v in range(lon_vtx.shape[1])]
         ring.append(ring[0])   # close the ring
@@ -791,7 +798,7 @@ def write_mesh_to_geojson(out_grid_data, tmp_path, cell_indices=None):
                 'type': 'Polygon',
                 'coordinates': [ring],
             },
-            'properties': {'cellid': int(cell_ids[i])},
+            'properties': {'cellid': int(idx[i])},
         })
 
     geojson = {'type': 'FeatureCollection', 'features': features}
@@ -886,9 +893,9 @@ def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
         val = props.get('mean', None)
         result_map[cid] = float(val) if (val is not None and not np.isnan(val)) else 0.0
 
-    # use out_grid_data.cell_id to map chunk positions -> cellid values -> result values
-    chunk_cell_ids = out_grid_data.cell_id[np.asarray(cell_indices, dtype=np.intp)]
-    out = np.array([result_map.get(int(cid), 0.0) for cid in chunk_cell_ids],
+    # cellid in the GeoJSON equals the row index (written by write_mesh_to_geojson)
+    # this is more efficient than looking up cell id values
+    out = np.array([result_map.get(int(idx), 0.0) for idx in np.asarray(cell_indices, dtype=np.intp)],
                    dtype=np.float64)
 
     logger.info(f"regrid_to_mesh: '{varname}' -> {len(out)} cells, "
@@ -906,7 +913,7 @@ def write_module_netcdf(out_grid_data, module_data, out_path, file_name,
     selected variables from one module data object (TopoData, LtData, etc.).
 
     Grid variables written (from out_grid_data):
-        cell_id (coordinate), cell_area, landfrac, lon_xy, lat_xy,
+        cell_id (coordinate), cell_area, landfrac, lon_cen, lat_cen,
         lon_vtx, lat_vtx
 
     Module variables written:
@@ -918,7 +925,7 @@ def write_module_netcdf(out_grid_data, module_data, out_path, file_name,
 
     Spatial subsetting:
         If ll_limits=(min_lat, max_lat, min_lon, max_lon) is given, only the
-        cells whose centre coordinates (out_grid_data.lat_xy / lon_xy) fall
+        cells whose centre coordinates (out_grid_data.lat_cen / lon_cen) fall
         within the bounding box are written.  Otherwise all cells are written.
 
     Args:
@@ -952,8 +959,8 @@ def write_module_netcdf(out_grid_data, module_data, out_path, file_name,
     if ll_limits is not None:
         min_lat, max_lat, min_lon, max_lon = ll_limits
         mask = (
-            (out_grid_data.lat_xy >= min_lat) & (out_grid_data.lat_xy <= max_lat) &
-            (out_grid_data.lon_xy >= min_lon) & (out_grid_data.lon_xy <= max_lon)
+            (out_grid_data.lat_cen >= min_lat) & (out_grid_data.lat_cen <= max_lat) &
+            (out_grid_data.lon_cen >= min_lon) & (out_grid_data.lon_cen <= max_lon)
         )
         idx = np.where(mask)[0]
     else:
@@ -994,9 +1001,9 @@ def write_module_netcdf(out_grid_data, module_data, out_path, file_name,
                                   attrs={'long_name': 'cell area'}),
         'landfrac':  xr.DataArray(out_grid_data.landfrac[idx],  dims=[cell_dim],
                                   attrs={'long_name': 'land fraction'}),
-        'lon_xy':    xr.DataArray(out_grid_data.lon_xy[idx],    dims=[cell_dim],
+        'lon_cen':    xr.DataArray(out_grid_data.lon_cen[idx],    dims=[cell_dim],
                                   attrs={'long_name': 'cell-centre longitude', 'units': 'degrees_east'}),
-        'lat_xy':    xr.DataArray(out_grid_data.lat_xy[idx],    dims=[cell_dim],
+        'lat_cen':    xr.DataArray(out_grid_data.lat_cen[idx],    dims=[cell_dim],
                                   attrs={'long_name': 'cell-centre latitude',  'units': 'degrees_north'}),
         'lon_vtx':   xr.DataArray(out_grid_data.lon_vtx[idx],  dims=[cell_dim, vtx_dim],
                                   attrs={'long_name': 'vertex longitudes', 'units': 'degrees_east'}),

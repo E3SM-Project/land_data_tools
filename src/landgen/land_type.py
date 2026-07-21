@@ -21,7 +21,7 @@ logger = logging.getLogger('landgen')
 ##### _process_single_year()
 def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_path, urban_path,
                          lake_path, ice_path, wetland_path, harvest_path, harvest_name, grazing_path, grazing_names,
-                         veg_assoc_path, com_config_dict, out_grid_data,
+                         veg_char_path, com_config_dict, out_grid_data,
                          manager, decomp_indices, decomp_ll_limits):
     """Process land type data for a single year."""
 
@@ -98,10 +98,10 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
     #lc_data = normalize_cell.reconcile_ocean(lt_year_data, out_grid_data, decomp_indices, decomp_ll_limits,
     #               manager)  # reconcile_ocean
 
-    if submod_run['veg_assoc']:
+    if submod_run['veg_char']:
         # Process veg-associated data
-        veg_assoc = importlib.import_module('landgen.veg_assoc')
-        lc_data = veg_assoc.run(lt_year_data, year, prev_year, veg_assoc_path, com_config_dict, out_grid_data,
+        veg_char = importlib.import_module('landgen.veg_char')
+        lc_data = veg_char.run(lt_year_data, year, prev_year, veg_char_path, com_config_dict, out_grid_data,
                             decomp_indices, decomp_ll_limits, manager)
 
     # Ensure consistency
@@ -129,7 +129,7 @@ def _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, 
 ## output
 
 def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_path, urban_path, lake_path, ice_path,
-        wetland_path, harvest_path, harvest_name, grazing_path, grazing_names, veg_assoc_path,
+        wetland_path, harvest_path, harvest_name, grazing_path, grazing_names, veg_char_path,
         com_config_dict, out_grid_data, manager, decomp_indices, decomp_ll_limits):
     if active is False:
         logger.info("Skipping land_type module")
@@ -169,7 +169,7 @@ def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_
         _process_single_year(lt_year_data, year, prev_year, submod_run, submod_dyn, out_fname,
                             lc_rs_path, lc_rs_name, crop_path, urban_path, lake_path, ice_path,
                             wetland_path, harvest_path, harvest_name, grazing_path, grazing_names,
-                            veg_assoc_path, com_config_dict, out_grid_data, manager,
+                            veg_char_path, com_config_dict, out_grid_data, manager,
                             decomp_indices, decomp_ll_limits)
 
         # no - would have to read in while file to reverse the order - append this year's data to the output file
@@ -198,6 +198,7 @@ def run(active, submod_run, submod_dyn, out_fname, lc_rs_path, lc_rs_name, crop_
 
     # todo: combine the annual files into one file in the correct time order
     # can use xarray.open_mfdataset(sorted_files) or ncrcat 
+    # actually, write individual year files
 
 
     ## todo: this is temporary for testing? or maybe not?

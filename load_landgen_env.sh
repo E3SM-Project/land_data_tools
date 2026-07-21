@@ -31,5 +31,5 @@ pip install -e .
 # (landgen is removed automatically since it is not on PyPI and is installed locally via pip install -e .)
 #conda env export -n landgen_env | grep -v "landgen==" > landgen_env.yml
 
-# to update the enviroment
+# to update the enviroment with a new .yml file (e.g. after pulling changes from git)
 #conda env update -n landgen_env -f landgen_env.yml

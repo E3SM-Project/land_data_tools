@@ -15,8 +15,13 @@ import os
 import traceback
 import time
 import shutil
+import tempfile
 
 logger = logging.getLogger('landgen')
+
+def _management_process_star(args):
+    """Module-level wrapper so imap_unordered can unpack the args tuple."""
+    return management_process(*args)
 
 ########## define some module-specific constants here
 
@@ -74,13 +79,8 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     """
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
-    min_lat, max_lat, min_lon, max_lon = ll_limits
-    tmp_dir = (
-        Path(com_config_dict['out_path'])
-        / 'tmp'
-        / f"management_{year}_{min_lat:.0f}_{min_lon:.0f}"
-    )
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
+    tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
 
     # Read source data (each worker reads its own copy)
     harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS, ll_limits)
@@ -92,10 +92,11 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     n_chunk_cells = len(row_indices)
     n_harvest = len(LUH2_HARVEST_VARS)
     n_grazing = len(grazing_names)
-    
+
     chunk_lt_data = LtData()
-    chunk_lt_data.allocate(n_cells=n_chunk_cells, n_harvest=n_harvest, n_grazing=n_grazing)
-    chunk_lt_data.cell_idx = row_indices  # Map chunk positions to global indices
+    chunk_lt_data.cell_idx     = np.array(row_indices, dtype=np.int64)
+    chunk_lt_data.harvest_frac = np.zeros((n_chunk_cells, n_harvest), dtype=np.float64)
+    chunk_lt_data.grazing_frac = np.zeros((n_chunk_cells, n_grazing), dtype=np.float64)
 
     try:
         # Write mesh once per chunk (same approach as landcover.py)
@@ -197,12 +198,9 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # per chunk — exactly the ll_limits that write_latlon_to_geotiff needs so the
     # raster slice fully covers every polygon in the chunk.
     #
-    # ASSUMPTION: decomp_indices contains 0-based row indices into out_grid_data arrays
-    # (not arbitrary cell ID values). This requires that the mesh file's cellid values
-    # are sequential (0, 1, 2, ..., n-1) matching their row positions. If cellid values
-    # are non-sequential or non-contiguous after subsetting, array indexing operations
-    # (e.g., out_grid_data.cell_id[idx], out_grid_data.lon_vtx[idx]) will produce
-    # incorrect results or index-out-of-bounds errors.
+    # decomp_indices contains 0-based row indices into out_grid_data arrays.
+    # write_mesh_to_geojson writes each cell's row index as the GeoJSON cellid property,
+    # so regrid_to_mesh can look up uraster results directly by index.
     data_chunks = []
     for row_indices, ll in zip(decomp_indices, decomp_ll_limits):
         if len(row_indices) == 0:
@@ -220,14 +218,10 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     n_chunks = len(data_chunks)
     print(f"  Submitting {n_chunks} management chunks to pool of {omp_threads_int} workers")
 
-    # Use simple Pool.starmap() approach (like landcover.py).
-    # Workers read their own data — simpler code, more portable.
-    # Trade-off: more I/O per chunk vs simpler implementation.
+    updated_vars = ['harvest_frac', 'grazing_frac']
     with mp.Pool(processes=omp_threads_int) as pool:
-        chunk_list_results = pool.starmap(management_process, data_chunks)
-
-    # Merge chunk results into global lt_year_data using copy_from
-    for chunk_lt_data in chunk_list_results:
-        lt_year_data.copy_from(chunk_lt_data, ['harvest_frac', 'grazing_frac'])
+        for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
+            lt_year_data.copy_from(chunk_lt_data, updated_vars)
+            del chunk_lt_data
 
     return

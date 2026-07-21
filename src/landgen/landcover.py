@@ -23,6 +23,10 @@ import numpy as np
 logger = logging.getLogger('landgen')
 resource_logger = logging.getLogger('ClusterMonitor')
 
+def _landcover_process_star(args):
+    """Module-level wrapper so imap_unordered can unpack the args tuple."""
+    return landcover_process(*args)
+
 ########## define helper functions for landcover run() here
 
 ##### landcover_process()
@@ -75,12 +79,14 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         mesh_file = Path(tmp_dir) / 'mesh.geojson'
         landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, cell_indices)
 
-        ## todo, if actually doing it this way, add a list of variables argument to the allocation function to allocate just a subset!!!
-        # create a local data structure just for this chunk
-        # set the cell indices in this chunk for later copying into the shared lt_year_data structure
+        # create a local data structure just for this chunk; only allocate the
+        # fields this module actually writes to minimise per-chunk memory usage.
+        # copy_from() silently skips None fields, so a partial allocation is safe.
         lt_chunk_data = shared_data.LtData()
-        lt_chunk_data.allocate(n_cells=len(cell_indices))
-        lt_chunk_data.cell_idx[:] = cell_indices
+        n = len(cell_indices)
+        lt_chunk_data.cell_idx  = np.array(cell_indices, dtype=np.int64)
+        lt_chunk_data.pct_pft   = np.zeros((n, shared_data.n_pfts_default),  dtype=np.float64)
+        lt_chunk_data.pct_ocean = np.zeros(n, dtype=np.float64)
 
         # todo: probably need to add lai path to land_type params and pass it through to here
 
@@ -287,16 +293,13 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     resource_logger.info(f"In landcover submodule run():\n"
         f"Submitting {len(data_chunks)} landcover chunks to pool of {cpus_avail_int} workers")
 
-    # submit the chunks to the pool
-    # todo: remove subset limit before production run
-    #N = 128
-    with mp.Pool(processes=cpus_avail_int) as pool:
-        chunk_list_results = pool.starmap(landcover_process, data_chunks)
-
-    # copy the results into the shared lt_year_data structure
-    # only copy fields that this module actually updates in lt_chunk_data
+    # Use imap_unordered so each chunk result is copied into lt_year_data and
+    # discarded as soon as it arrives, keeping only ~1 chunk result in memory
+    # at a time instead of accumulating all 360 simultaneously.
     updated_vars = ['pct_pft', 'pct_ocean']
-    for chunk_result in chunk_list_results:
-        lt_year_data.copy_from(chunk_result, updated_vars)
+    with mp.Pool(processes=cpus_avail_int) as pool:
+        for chunk_result in pool.imap_unordered(_landcover_process_star, data_chunks):
+            lt_year_data.copy_from(chunk_result, updated_vars)
+            del chunk_result
 
     return

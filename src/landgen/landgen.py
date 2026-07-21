@@ -39,13 +39,14 @@ def main(config_path):
     modules = config.get('modules', [])
 
     # set up the cluster resource logger
-    # log every 5 minutes (300 seconds); adjust as needed
+    # the default interval is 1 minute (60 seconds)
+    #    adjust as needed by changing'interval_sec': ### below in kwargs
     resource_log_name = f'resource_monitor_{timestamp}_{job_id}.log'
     resource_logger = tools.setup_logger('ClusterMonitor', out_path / resource_log_name)
     stop_event = threading.Event()
     resource_monitor_thread = threading.Thread(
             target=tools.monitor_cluster_resources,
-            args=(300.0, stop_event),
+            kwargs={'interval_sec': 60.0, 'stop_event': stop_event},
             daemon=True)
     resource_monitor_thread.start()
 
@@ -88,25 +89,21 @@ def main(config_path):
     decomp_indices   = []
     decomp_ll_limits = []
     mesh_nc_path = Path(com_config_dict['source_data_path']) / com_config_dict['landgen_grid_path']
-    chunk_file = landgen_io.set_decomp_cell_idx_ll_limits(mesh_nc_path, decomp_indices, decomp_ll_limits, 
-            com_config_dict['decomp_box_size_degrees'], com_config_dict['out_path'])
-
-    ## todo: read in the grid file and set the values in out_grid_data - may not need this?
-    # actually, get this info and store it for now; probably don't need the manager and lock stuff, though
-    out_grid_data = shared_data.GridData()
-    out_grid_data.allocate(n_cells=sum(len(t) for t in decomp_indices))
 
     # load all mesh cells from the NetCDF domain file and fill out_grid_data
     mesh = landgen_io.load_mesh_nc(mesh_nc_path)  # loads all cells (no indices/ll_limits filter)
+    out_grid_data = shared_data.GridData()
+    out_grid_data.allocate(n_cells=mesh['cellid'].shape[0], n_vertices=mesh['lon_v'].shape[1])
     out_grid_data.cell_id[:]              = mesh['cellid']
-    out_grid_data.lon_xy[:]              = mesh['lon']
-    out_grid_data.lat_xy[:]              = mesh['lat']
+    out_grid_data.lon_cen[:]              = mesh['lon']
+    out_grid_data.lat_cen[:]              = mesh['lat']
     out_grid_data.cell_area[:]           = mesh['area']
-    out_grid_data.lon_vtx[:, :]          = mesh['xv']   # shape (n_cells, n_vertices)
-    out_grid_data.lat_vtx[:, :]          = mesh['yv']   # shape (n_cells, n_vertices)
-    # landfrac is initialised to 1 by allocate(); updated later by topography module
+    out_grid_data.lon_vtx[:, :]          = mesh['lon_v']   # shape (n_cells, n_vertices)
+    out_grid_data.lat_vtx[:, :]          = mesh['lat_v']   # shape (n_cells, n_vertices)
+    # landfrac is initialised to 1 by allocate(); updated later by landcover? module
 
-    ## todo: need to figure out how to write the large output file without storing the entire grid in memory ? 
+    chunk_file = landgen_io.set_decomp_cell_idx_ll_limits(out_grid_data, decomp_indices, decomp_ll_limits, 
+            com_config_dict['decomp_box_size_degrees'], com_config_dict['out_path'])
 
     try:
         for mod in modules:
@@ -116,9 +113,12 @@ def main(config_path):
                 module = importlib.import_module(f'landgen.{name}')
                 if hasattr(module, 'run'):
                     logger.info(f"Running module: {name}")
-                    run_list = [*params.values(), com_config_dict, out_grid_data, manager, \
-                                 decomp_indices, decomp_ll_limits]
-                    module.run(*run_list)
+                    module.run(**params,
+                               com_config_dict=com_config_dict,
+                               out_grid_data=out_grid_data,
+                               manager=manager,
+                               decomp_indices=decomp_indices,
+                               decomp_ll_limits=decomp_ll_limits)
                 else:
                     logger.warning(f"Module {name} does not have a 'run' function.")
             except ImportError as e:

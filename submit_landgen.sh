@@ -62,15 +62,16 @@ conda activate landgen_env
 # which resolves to the SLURM spool directory at runtime.
 
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+INPUT_FILE="config.json"
 
 # Redirect stdout and stderr to the run output directory.
 # #SBATCH --output cannot reference shell variables, so we use exec to replace
 # this script's file descriptors after reading out_path from config.json.
 # The default slurm-JOBID.out in the submit dir will be created but left empty.
-OUT_PATH=$(python -c "import json,sys; print(json.load(open('${SCRIPT_DIR}/config.json')).get('out_path','.'))")
+OUT_PATH=$(python -c "import json,sys; print(json.load(open('${SCRIPT_DIR}/${INPUT_FILE}')).get('out_path','.'))")
 mkdir -p "${OUT_PATH}"
 exec > "${OUT_PATH}/slurm-${SLURM_JOB_ID}.out" 2>&1
 # Remove the now-empty default SLURM output file from the submit directory
 rm -f "${SLURM_SUBMIT_DIR}/slurm-${SLURM_JOB_ID}.out"
 
-srun python -m landgen "${SCRIPT_DIR}/config.json"
+srun python -m landgen "${SCRIPT_DIR}/${INPUT_FILE}"

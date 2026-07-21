@@ -30,7 +30,7 @@ To execute this package using SLURM:
 """
 
 if __name__ == '__main__':
-    # use spawn start method for multiprocessing to avoid issues with fork on some platforms
+    # use forkserver start method for multiprocessing to avoid issues with fork on some platforms
     mp.set_start_method('forkserver')
     if len(sys.argv) == 2 and sys.argv[1] in ('-h', '--help'):
         print(HELP)

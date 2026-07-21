@@ -47,7 +47,7 @@ n_levslp_default = 11
 # multiprocessing workers.  All arrays are float64 except cell_id (int64).
 # This can be used for any grid, but we currently use a healpix grid
 # n_cells: number of 'land' cells in the landgen out grid
-#    lon_xy and lat_xy are the cell 'center' coordinates
+#    lon_cen and lat_cen are the cell 'center' coordinates
 #    lon_vtx and lat_vtx are the vertex coordinates for each cell
 #    n_vertices: number of vertices per cell (4 for quadrilateral cells)
 # landfrac is determined by the topography processing, so initialize to 1 here
@@ -59,8 +59,8 @@ class GridData:
         self.num_cells   = None    # int     - number of 'land' cells in out grid
         self.num_vertices   = None    # int  - number of vertices per cell
         self.cell_id  = None    # int64   [n_cells]
-        self.lon_xy   = None    # float64 [n_cells]
-        self.lat_xy   = None    # float64 [n_cells]
+        self.lon_cen   = None    # float64 [n_cells]
+        self.lat_cen   = None    # float64 [n_cells]
         self.cell_area = None   # float64 [n_cells]
         self.landfrac = None    # float64 [n_cells]
         self.lon_vtx  = None    # float64 [n_cells, n_vertices]
@@ -72,8 +72,8 @@ class GridData:
         self.num_cells   = n_cells
         self.num_vertices = n_vertices
         self.cell_id  = np.zeros(n_cells,               dtype=np.int64)
-        self.lon_xy   = np.zeros(n_cells,               dtype=np.float64)
-        self.lat_xy   = np.zeros(n_cells,               dtype=np.float64)
+        self.lon_cen   = np.zeros(n_cells,               dtype=np.float64)
+        self.lat_cen   = np.zeros(n_cells,               dtype=np.float64)
         self.cell_area = np.zeros(n_cells,              dtype=np.float64)
         self.landfrac = np.ones(n_cells,                dtype=np.float64)
         self.lon_vtx  = np.zeros((n_cells, n_vertices), dtype=np.float64)
@@ -81,8 +81,8 @@ class GridData:
 
     # --- getter methods (needed for proxy access via GridManager) ---
     def get_cell_id(self):   return self.cell_id
-    def get_lon_xy(self):    return self.lon_xy
-    def get_lat_xy(self):    return self.lat_xy
+    def get_lon_cen(self):    return self.lon_cen
+    def get_lat_cen(self):    return self.lat_cen
     def get_cell_area(self): return self.cell_area
     def get_landfrac(self):  return self.landfrac
     def get_lon_vtx(self):   return self.lon_vtx
@@ -91,8 +91,8 @@ class GridData:
 
     # --- setter methods (needed for proxy access via GridManager) ---
     def set_cell_id(self, v):   self.cell_id   = v
-    def set_lon_xy(self, v):    self.lon_xy    = v
-    def set_lat_xy(self, v):    self.lat_xy    = v
+    def set_lon_cen(self, v):    self.lon_cen    = v
+    def set_lat_cen(self, v):    self.lat_cen    = v
     def set_cell_area(self, v): self.cell_area = v
     def set_landfrac(self, v):  self.landfrac  = v
     def set_lon_vtx(self, v):   self.lon_vtx   = v
