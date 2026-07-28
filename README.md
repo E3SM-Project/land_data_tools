@@ -20,7 +20,7 @@ Official version releases will be tagged, with one version number representing b
 
 ## License
 
-These softwares are released under a 3-Clause BSD Open Source license. See LICENCE for details.
+These softwares are released under a 3-Clause BSD Open Source license. See LICENSE for details.
 
 ## Contributing
 
