@@ -1,0 +1,38 @@
+Both landgen and mksurfdata are released under the following 3-Clause Open Source license.
+
+****************************************************************************************************
+Copyright 2026, The Regents of the University of California, through Lawrence Berkeley National
+Laboratory (LBNL)
+
+Software names:
+landgen
+mksurfdata
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation and/or
+other materials provided with the distribution.
+
+3. Neither the names of the copyright holder nor the Department of Energy nor the names of its
+contributors may be used to endorse or promote products derived from this software without specific
+prior written permission.
+
+THE SOFTWARE IS SUPPLIED "AS IS" WITHOUT WARRANTY OF ANY KIND.
+NEITHER THE UNITED STATES GOVERNMENT, NOR THE UNITED STATES DEPARTMENT OF
+ENERGY, NOR THE REGENTS OF THE UNIVERSITY OF CALIFORNIA, NOR LAWRENCE BERKELEY NATIONAL LABORATORY,
+NOR ANY OF THEIR EMPLOYEES, MAKES ANY WARRANTY, EXPRESS OR IMPLIED, OR ASSUMES ANY LEGAL LIABILITY
+OR RESPONSIBILITY FOR THE ACCURACY, COMPLETENESS, OR USEFULNESS OF ANY INFORMATION, DATA,
+APPARATUS, PRODUCT, OR PROCESS DISCLOSED, OR REPRESENTS THAT ITS USE WOULD
+NOT INFRINGE PRIVATELY OWNED RIGHTS.
+
+****************************************************************************************************
+
+landgen is completely new software.
+mksurfdata is new software that is loosely based on some functionality present in the software
+of the same name stored as a tool in the Energy Exascale Earth System Model (E3SM)
+Land Model (ELM) code.
