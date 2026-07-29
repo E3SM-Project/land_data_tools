@@ -216,13 +216,30 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
 ## this sets up the pool and calls the landcover_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-                            com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits,
-                            manager):
+                            com_config_dict, out_grid_data, manager, decomp_box_size_degrees=10):
 
 
 
     logger.info(f"Processing landcover module")
     # todo: print the parameters here
+
+    # default data chunks are based on 10x10 degree lat-lon boxes (648 chunks)
+    #    15x15 degree box gives 288 chunks, 30x30 box gives 72 chunks
+    # Note that chunks are not equal in size
+
+    # these are lists of tuples with each tuple defining a chunk, and are paired in order
+    # decomp_indices: indices within each chunk for the landgen grid file variables 
+    # decomp_ll_limits = list(float) of [(min_lat, max_lat, min_lon, max_lon),... for each chunk]
+    #    these are based on the vertices of the cells in decomp_indices to ensure full coverage
+    # the chunk_file is written, but not used; it is for diagnostics
+    # note that indices are 0-based in these arrays
+
+    # compute local decomp for this submodule using its configured chunk size
+    decomp_indices = []
+    decomp_ll_limits = []
+    landgen_io.set_decomp_cell_idx_ll_limits(
+        out_grid_data, decomp_indices, decomp_ll_limits,
+        decomp_box_size_degrees, com_config_dict['out_path'])
 
     # Determine the number of worker processes to use.
     # Priority: SRUN_CPUS_PER_TASK (set explicitly in submit script via srun)

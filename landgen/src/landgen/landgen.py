@@ -58,36 +58,24 @@ def main(config_path):
                 'landgen_grid_path': config.get('landgen_grid_path', ''),
                 'ocean_shapefile_path': config.get('ocean_shapefile_path', ''),
                 'out_path': config.get('out_path', ''),
-                'decomp_box_size_degrees': config.get('decomp_box_size_degrees', 10),
                 'log_path': str(out_path / log_name),
             }
     manager = mp.Manager()
     com_config_dict = manager.dict(temp_dict)
 
-    ## todo: delete if not using grid manager
-    # for now just set up a structure for use by the master proc
-    # the only thing to be updated in this structure is the landfrac
-    # if using the manager, need to create set/get functions for the variables
-    # create the shared landgen out grid shared data structure
-    #grid_manager = shared_data.GridManager()
-    #grid_manager.start()
-    #out_grid_data = grid_manager.GridData()
-    #out_grid_data.allocate()
-
-    # do the decomposition of the landgen mesh here for all modules
-    # these are passed by reference to the run() functions for each module
+    # Note that the decomposition of the landgen mesh is done by each module/submodule, with specific
+    #    decomp sizes set for each module/submodule by the user, to maximize efficiency for specific
+    #    source data and processing.
     # default data chunks are based on 10x10 degree lat-lon boxes (648 chunks)
     #    15x15 degree box gives 288 chunks, 30x30 box gives 72 chunks
     # Note that chunks are not equal in size
 
-    # these are lists of tuples with each tuple defining a chunk, and are paired in order
+    # the chunk data structures are lists of tuples with each tuple defining a chunk, and are paired in order
     # decomp_indices: indices within each chunk for the landgen grid file variables 
     # decomp_ll_limits = list(float) of [(min_lat, max_lat, min_lon, max_lon),... for each chunk]
     #    these are based on the vertices of the cells in decomp_indices to ensure full coverage
-    # the chunk_file is written, but not used; it is for diagnostics
     # note that indices are 0-based in these arrays
-    decomp_indices   = []
-    decomp_ll_limits = []
+
     mesh_nc_path = Path(com_config_dict['source_data_path']) / com_config_dict['landgen_grid_path']
 
     # load all mesh cells from the NetCDF domain file and fill out_grid_data
@@ -102,9 +90,6 @@ def main(config_path):
     out_grid_data.lat_vtx[:, :]          = mesh['lat_v']   # shape (n_cells, n_vertices)
     # landfrac is initialised to 1 by allocate(); updated later by landcover? module
 
-    chunk_file = landgen_io.set_decomp_cell_idx_ll_limits(out_grid_data, decomp_indices, decomp_ll_limits, 
-            com_config_dict['decomp_box_size_degrees'], com_config_dict['out_path'])
-
     try:
         for mod in modules:
             name = mod['name']
@@ -116,9 +101,7 @@ def main(config_path):
                     module.run(**params,
                                com_config_dict=com_config_dict,
                                out_grid_data=out_grid_data,
-                               manager=manager,
-                               decomp_indices=decomp_indices,
-                               decomp_ll_limits=decomp_ll_limits)
+                               manager=manager)
                 else:
                     logger.warning(f"Module {name} does not have a 'run' function.")
             except ImportError as e:

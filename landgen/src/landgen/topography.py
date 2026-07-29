@@ -34,7 +34,7 @@ logger = logging.getLogger('landgen')
 
 ## output
 
-def run(active, out_fname, com_config_dict, out_grid_data, manager, decomp_indices, decomp_ll_limits):
+def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out_grid_data=None, manager=None):
     if active is False:
         logger.info("Topography processing is not active, but reading in landfrac data for other active modules.")
         output_file = Path(com_config_dict['out_path']) / out_fname

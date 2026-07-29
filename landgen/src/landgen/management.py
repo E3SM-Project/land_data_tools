@@ -83,10 +83,11 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
 
     # Read source data (each worker reads its own copy)
-    harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS, ll_limits)
+    source_data_path = Path(com_config_dict['source_data_path'])
+    harvest_data = landgen_io.read_netcdf_ll(year, source_data_path / harvest_path / harvest_name, LUH2_HARVEST_VARS, ll_limits)
     grazing_data = {}
     for stem, grazing_name in grazing_names.items():
-        grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem], ll_limits)
+        grazing_data[stem] = landgen_io.read_netcdf_ll(year, source_data_path / grazing_path / grazing_name, [stem], ll_limits)
 
     # Create chunk-sized LtData object
     n_chunk_cells = len(row_indices)
@@ -168,7 +169,7 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
 ## this sets up the pool and calls the management_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits):
+        com_config_dict, out_grid_data, decomp_box_size_degrees=10):
 
     print(f"Processing management module with parameters:")
     # todo: print the parameters here
@@ -191,6 +192,13 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
                     f"SLURM_CPUS_ON_NODE={os.environ.get('SLURM_CPUS_ON_NODE')})")
     else:
         logger.info(f"Running locally: using {omp_threads_int} workers (mp.cpu_count())")
+
+    # compute local decomp for this submodule using its configured chunk size
+    decomp_indices = []
+    decomp_ll_limits = []
+    landgen_io.set_decomp_cell_idx_ll_limits(
+        out_grid_data, decomp_indices, decomp_ll_limits,
+        decomp_box_size_degrees, com_config_dict['out_path'])
 
     # Build data_chunks from the pre-computed decomp_indices / decomp_ll_limits
     # passed in from landgen.py via land_type.py.  These were produced by
