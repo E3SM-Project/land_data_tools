@@ -32,23 +32,25 @@ def _landcover_process_star(args):
 ##### landcover_process()
 
 ## arguments
-# lc_data: land cover data structure that is passed between modules
 # year: the year for which to process the land cover data
 # prev_year: the previous year for which land cover data were processed
-# source_data_path: base path to the source data
-# landgen_grid_path: path from source_data_path and the filename of the landgen grid
+# prev_fname: the output filename for the previous year's land cover data (if _use_lc_rs is False)
 # lc_rs_path: path from source_data_path and the filename of the land cover remote sensing data (if _use_lc_rs is True)
-# out_path: base path for the output data; this is needed to read in the previous year's land cover data (if _use_lc_rs is False)
-# prev_out_fname: the output filename for the previous year's land cover data (if _use_lc_rs is False)
+# lc_rs_name: name identifier of the land cover remote sensing data (if _use_lc_rs is True)
+# com_config_dict: the shared dictionary for the common parameters for all modules
+# out_grid_data: the shared data structure for the landgen grid data
+# cell_indices: the indices of the landgen grid cells for this chunk
+# ll_limits: the lat/lon limits of the landgen grid cells for this chunk
 
 ## output
+# returns an LtData object for this chunk, which will be copied into the shared lt_year_data structure in run()
 
 def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
                             com_config_dict, out_grid_data, cell_indices, ll_limits
                             ):
 
-    # todo: need to sort out printing from multiple processes
-    #print(f"Processing landcover module year {year} with parameters:")
+    # todo: need to sort out printing from multiple processes?
+    # print(f"Processing landcover module year {year} with parameters:")
     # todo: print the parameters here?
 
     # Determine a scratch base directory for worker-local temporary files.
@@ -56,6 +58,11 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     # Each worker gets its own subdirectory to avoid cross-worker file collisions.
     scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
     tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'landcover_{year}_'))
+
+    # Change CWD to the worker-local tmp_dir so that uraster's internally-generated
+    # files (intermediate data files, logs) land here rather than in the shared job CWD,
+    # preventing collisions between parallel workers.
+    os.chdir(tmp_dir)
 
     # Re-attach logging in this worker process.  In forkserver mode each worker
     # starts as a clean process with no logging handlers configured.
@@ -75,9 +82,10 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     try:
 
         # first write the mesh file for this chunk
-            # first write the mesh file for this chunk
-        mesh_file = Path(tmp_dir) / 'mesh.geojson'
-        landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, cell_indices)
+        #mesh_file = Path(tmp_dir) / 'mesh.geojson'
+        #landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, cell_indices)
+        mesh_file = Path(tmp_dir) / 'mesh.gpkg'
+        landgen_io.write_mesh_to_geopackage(out_grid_data, mesh_file, cell_indices)
 
         # create a local data structure just for this chunk; only allocate the
         # fields this module actually writes to minimise per-chunk memory usage.
@@ -216,7 +224,7 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
 ## this sets up the pool and calls the landcover_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-                            com_config_dict, out_grid_data, manager, decomp_box_size_degrees=10):
+                            com_config_dict, out_grid_data, decomp_box_size_degrees=10):
 
 
 
@@ -264,32 +272,19 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         logger.info(f"Running locally: using {cpus_avail_int} workers (mp.cpu_count())")
 
     # set up the pool and call the landcover_process() function for each chunk of data
-    # chunks are defined by the lat-lon limits and corresponding landgen grid cell ids for the chunk;
-    #    these are created in land_type.process_single_year() and passed to this run() function
-    # there are more chunks than cpus; the pool will manage this for efficiency because chunks vary in size
-    # the results will be stored directly in the lt_year_data shared structure
 
-    # get the manager locks for the shared data structures
-    # using data-specific locks, watch out for deadlocks.  
-    #man_lock  = manager.Lock()
-    #grid_lock = manager.Lock()
+    ## as defined above,
+    # each chunk is a tuple of the arguments for landcover_process, residing in a list
+    # each tuple includes the lat/lon limits and cell ids for the chunk, and the static arguments that are repeated for each chunk
+    # e.g.: data_chunks = [(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
+    #          com_config_dict, out_grid_data, decomp_indices[0], decomp_ll_limits[0]),
+    #          (year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
+    #          com_config_dict, out_grid_data, decomp_indices[1], decomp_ll_limits[1]), etc]
 
-## todo: figure out the data to pass here
-# each chunk is a tuple of the arguments for landcover_process, residing in a list
-# each tuple includes the lat/lon limits and cell ids for the chunk, and the static arguments that are repeated for each chunk
-# e.g.: data_chunks = [(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-#          com_config_dict, out_grid_data, ll_limits1, cell_ids1, man_lock, grid_lock, lt_lock),
-#          (lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
-#           com_config_dict, out_grid_data, ll_limits2, cell_ids2, man_lock, grid_lock, lt_lock), etc]
+    ## Use the simple return/copy approach
+    # have the process function return an LtData object for the chunk, and then copy the data into the shared lt_year_data structure in this run() function
+    # this is simpler to code and avoids potential issues with multiple processes writing to the same shared data structure, but may be less efficient because of the copying step
 
-## first try the return/copy approach to get this working
-# have the process function return an LtData object for the chunk, and then copy the data into the shared lt_year_data structure in this run() function
-# this is simpler to code and avoids potential issues with multiple processes writing to the same shared data structure, but may be less efficient because of the copying step
-## an alternative is to redefine lt_year_data as a numpy array of individual cell data structures of numpy arrays for each variable,
-#.   define this as shared memory,
-#.   and then each worker can write directly to the appropriate cells in the shared lt_year_data structure based on the cell ids for the chunk
-
-    ## todo: check that this is correct
     # sort decomp_indices and decomp_ll_limits together, largest chunks first,
     # so the pool receives the most expensive work items early (improves load balancing)
     sorted_pairs = sorted(zip(decomp_indices, decomp_ll_limits),

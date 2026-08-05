@@ -35,7 +35,7 @@ logger = logging.getLogger('landgen')
 
 ## output
 
-def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out_grid_data=None, manager=None):
+def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out_grid_data=None):
     if active is False:
         logger.info("Skipping soil module")
         return
@@ -46,8 +46,6 @@ def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out
     source_data_path  = com_config_dict['source_data_path']
     landgen_grid_path = com_config_dict['landgen_grid_path']
     out_path          = com_config_dict['out_path']
-    # landfrac is stored in out_grid_data (set by topography module)
-    landfrac          = out_grid_data.get_landfrac()
 
     logger.info("Processing soil module")
     # todo: print the parameters here

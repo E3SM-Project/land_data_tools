@@ -18,7 +18,7 @@ import os
 import math
 import re
 from pyproj import Proj
-from osgeo import gdal
+from osgeo import gdal, ogr, osr
 
 
 #--------------------------------------------------------------------------
@@ -811,6 +811,73 @@ def write_mesh_to_geojson(out_grid_data, tmp_path, cell_indices=None):
     return tmp_path
 
 #--------------------------------------------------------------------------
+def write_mesh_to_geopackage(out_grid_data, tmp_path, cell_indices=None):
+    """
+    Write mesh cells from a GridData object to a GeoPackage file.
+
+    Equivalent to write_mesh_to_geojson but uses GeoPackage format, which
+    supports NULL field values and is accepted by GDAL 3.x without issues
+    when uraster writes per-cell mean values that may be NaN.
+
+    Args:
+        out_grid_data (GridData): Populated grid geometry object.
+        tmp_path (str|Path):      Full path of the output GeoPackage file to
+                                  write.  Parent directories are created if
+                                  needed.
+        cell_indices (tuple|array-like|None): 0-based indices into the
+                                  out_grid_data arrays selecting which cells to
+                                  write.  Pass None to write all cells.
+
+    Returns:
+        Path: Path to the written GeoPackage file.
+    """
+    if cell_indices is None:
+        idx = np.arange(out_grid_data.num_cells, dtype=np.intp)
+    else:
+        idx = np.asarray(cell_indices, dtype=np.intp)
+
+    if idx.size == 0:
+        raise ValueError("write_mesh_to_geopackage: cell_indices is empty — no cells to write")
+
+    lon_vtx = out_grid_data.lon_vtx[idx]   # (n, n_vertices)
+    lat_vtx = out_grid_data.lat_vtx[idx]   # (n, n_vertices)
+
+    tmp_path = Path(tmp_path)
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    driver = ogr.GetDriverByName('GPKG')
+    ds = driver.CreateDataSource(str(tmp_path))
+
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+
+    layer = ds.CreateLayer('mesh', srs=srs, geom_type=ogr.wkbPolygon)
+    layer.CreateField(ogr.FieldDefn('cellid', ogr.OFTInteger))
+
+    layer_defn = layer.GetLayerDefn()
+    for i in range(len(idx)):
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for v in range(lon_vtx.shape[1]):
+            ring.AddPoint_2D(float(lon_vtx[i, v]), float(lat_vtx[i, v]))
+        ring.AddPoint_2D(float(lon_vtx[i, 0]), float(lat_vtx[i, 0]))   # close ring
+
+        poly = ogr.Geometry(ogr.wkbPolygon)
+        poly.AddGeometry(ring)
+
+        feature = ogr.Feature(layer_defn)
+        feature.SetGeometry(poly)
+        feature.SetField('cellid', int(idx[i]))
+        layer.CreateFeature(feature)
+        feature = None
+
+    ds = None   # flush and close
+
+    logger.info(f"write_mesh_to_geopackage: wrote {len(idx)} cells to {tmp_path}")
+    return tmp_path
+
+#--------------------------------------------------------------------------
 def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
                    out_type='path', remap_method=3):
     """
@@ -853,8 +920,13 @@ def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
     if not raster_path.exists():
         raise FileNotFoundError(f"regrid_to_mesh: raster file not found: {raster_path}")
 
-    # output file sits next to the mesh file
-    out_path = mesh_path.parent / f"{varname}.geojson"
+    # output file sits next to the mesh file.
+    # GeoPackage (.gpkg) is used instead of GeoJSON because GeoJSON does not
+    # support NaN as a JSON value — GDAL 3.x raises a write error for cells
+    # whose mean is NaN (all source raster pixels were nodata).  GeoPackage
+    # stores NULL for those cells, which are tracked by uraster.
+    #out_path = mesh_path.parent / f"{varname}.geojson"
+    out_path = mesh_path.parent / f"{varname}.gpkg"
 
     config = {
         'sFilename_source_mesh':   str(mesh_path),
@@ -882,18 +954,32 @@ def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
     if out_type == 'path':
         return out_path
 
-    # out_type == 'data': read output GeoJSON and align values to cell_indices order
-    with open(out_path, 'r') as f:
-        geojson = json.load(f)
-
+    # out_type == 'data': read output GeoPackage and align values to cell_indices order.
+    # NULL mean values (cells where all source raster pixels were nodata) are mapped to 0.0.
+    ds_ogr = ogr.Open(str(out_path))
+    if ds_ogr is None:
+        raise RuntimeError(f"regrid_to_mesh: could not open uraster output: {out_path}")
+    layer = ds_ogr.GetLayer(0)
     result_map = {}
-    for feature in geojson['features']:
-        props = feature['properties']
-        cid = int(props['cellid'])
-        val = props.get('mean', None)
-        result_map[cid] = float(val) if (val is not None and not np.isnan(val)) else 0.0
+    for feature in layer:
+        cid = feature.GetField('cellid')
+        val = feature.GetField('mean')
+        if cid is not None:
+            result_map[int(cid)] = float(val) if val is not None else 0.0
+    ds_ogr = None
 
-    # cellid in the GeoJSON equals the row index (written by write_mesh_to_geojson)
+    # out_type == 'data': read output GeoJSON and align values to cell_indices order
+    #with open(out_path, 'r') as f:
+    #    geojson = json.load(f)
+
+    #result_map = {}
+    #for feature in geojson['features']:
+    #    props = feature['properties']
+    #    cid = int(props['cellid'])
+    #    val = props.get('mean', None)
+    #    result_map[cid] = float(val) if (val is not None and not np.isnan(val)) else 0.0
+
+    # cellid in the GeoPackage equals the row index (written by write_mesh_to_geopackage)
     # this is more efficient than looking up cell id values
     out = np.array([result_map.get(int(idx), 0.0) for idx in np.asarray(cell_indices, dtype=np.intp)],
                    dtype=np.float64)

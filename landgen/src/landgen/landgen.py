@@ -3,7 +3,6 @@
 # year processing can go forward or backward in time, so set the start and end years appropriately in the config file
 # config_path is the full path the .json config file, including the file name, e.g. /path/to/config.json
 
-import multiprocessing as mp
 import importlib
 import json
 import os
@@ -60,8 +59,7 @@ def main(config_path):
                 'out_path': config.get('out_path', ''),
                 'log_path': str(out_path / log_name),
             }
-    manager = mp.Manager()
-    com_config_dict = manager.dict(temp_dict)
+    com_config_dict = temp_dict
 
     # Note that the decomposition of the landgen mesh is done by each module/submodule, with specific
     #    decomp sizes set for each module/submodule by the user, to maximize efficiency for specific
@@ -89,6 +87,7 @@ def main(config_path):
     out_grid_data.lon_vtx[:, :]          = mesh['lon_v']   # shape (n_cells, n_vertices)
     out_grid_data.lat_vtx[:, :]          = mesh['lat_v']   # shape (n_cells, n_vertices)
     # landfrac is initialised to 1 by allocate(); updated later by landcover? module
+    ## todo: need to fill landfrac properly, either from landcover if it is active, or read from a file.
 
     try:
         for mod in modules:
@@ -100,8 +99,7 @@ def main(config_path):
                     logger.info(f"Running module: {name}")
                     module.run(**params,
                                com_config_dict=com_config_dict,
-                               out_grid_data=out_grid_data,
-                               manager=manager)
+                               out_grid_data=out_grid_data)
                 else:
                     logger.warning(f"Module {name} does not have a 'run' function.")
             except ImportError as e:
@@ -126,7 +124,6 @@ def main(config_path):
                 except Exception:
                     pass
 
-        manager.shutdown()
         stop_event.set()
         resource_monitor_thread.join()
         resource_logger.info("Cluster resource monitor thread stopped.")

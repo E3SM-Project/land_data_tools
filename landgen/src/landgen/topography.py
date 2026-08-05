@@ -12,7 +12,7 @@ import logging
 import sys
 from pathlib import Path
 from . import shared_data
-from .shared_data import TopoData, TopoManager
+from .shared_data import TopoData
 
 logger = logging.getLogger('landgen')
 
@@ -29,27 +29,23 @@ logger = logging.getLogger('landgen')
 ## these first ones are module-specific parameters that are set in the config file
 # active: true = module is run, false = module is skipped
 # out_fname: output filename for the module
+# decomp_box_size_degrees: the size of the decomposition box in degrees for parallel processing
 # com_config_dict: the shared dictionary for the common parameters for all modules
 # out_grid_data: the shared data structure for the landgen grid data
 
 ## output
 
-def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out_grid_data=None, manager=None):
+def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out_grid_data=None):
     if active is False:
-        logger.info("Topography processing is not active, but reading in landfrac data for other active modules.")
-        output_file = Path(com_config_dict['out_path']) / out_fname
-        if output_file.exists():
-            logger.info(f"Output file {output_file} exists; reading in existing data.")
-            ## todo: need to define read_landfrac to return the data in the correct format for the shared data structure
-            # out_grid_data.set_landfrac(read_landfrac(output_file))
-            raise FileNotFoundError(
-                f"Output file {output_file} does not exist; set active to True to process topography data.")
+        logger.info("Skipping topography module")
+        return
 
     # set up the topography module shared data structure
-    topo_manager = TopoManager()
-    topo_manager.start()
-    topo_out_data = topo_manager.TopoData()
-    topo_out_data.allocate()
+    topo_out_data = TopoData()
+    # get the actual number of land cells from out_grid_data
+    n_cells = out_grid_data.num_cells
+    print(f"  Allocating TopoData for {n_cells} land cells")
+    topo_out_data.allocate(n_cells=n_cells)
 
     logger.info("Processing topography module")
     # todo: print the parameters here
@@ -62,5 +58,4 @@ def run(active, out_fname, decomp_box_size_degrees=10, com_config_dict=None, out
 
     # free the module-specific shared data structure
     topo_out_data = None
-    topo_manager.shutdown()
     return

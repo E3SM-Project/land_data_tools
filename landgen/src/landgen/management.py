@@ -82,6 +82,11 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
     tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
 
+    # Change CWD to the worker-local tmp_dir so that uraster's internally-generated
+    # files (intermediate data files, logs) land here rather than in the shared job CWD,
+    # preventing collisions between parallel workers.
+    os.chdir(tmp_dir)
+
     # Read source data (each worker reads its own copy)
     source_data_path = Path(com_config_dict['source_data_path'])
     harvest_data = landgen_io.read_netcdf_ll(year, source_data_path / harvest_path / harvest_name, LUH2_HARVEST_VARS, ll_limits)
@@ -101,8 +106,10 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
 
     try:
         # Write mesh once per chunk (same approach as landcover.py)
-        mesh_file = tmp_dir / 'mesh.geojson'
-        landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, row_indices)
+        #mesh_file = tmp_dir / 'mesh.geojson'
+        #landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, row_indices)
+        mesh_file = tmp_dir / 'mesh.gpkg'
+        landgen_io.write_mesh_to_geopackage(out_grid_data, mesh_file, row_indices)
 
         # --- regrid harvest variables ---
         # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
@@ -207,7 +214,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # raster slice fully covers every polygon in the chunk.
     #
     # decomp_indices contains 0-based row indices into out_grid_data arrays.
-    # write_mesh_to_geojson writes each cell's row index as the GeoJSON cellid property,
+    # write_mesh_to_geopackage writes each cell's row index as the GeoPackage cellid property,
     # so regrid_to_mesh can look up uraster results directly by index.
     data_chunks = []
     for row_indices, ll in zip(decomp_indices, decomp_ll_limits):

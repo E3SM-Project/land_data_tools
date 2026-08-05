@@ -1,10 +1,10 @@
 {
   "start_year": 2015,
   "end_year": 2015,
-  "source_data_path": "/global/cfs/cdirs/e3sm/landgen/rawdata",
+  "source_data_path": "/lcrc/group/e3sm/landgen/rawdata",
   "landgen_grid_path": "healpix/10km/land_domain_file_healpix_10km.nc",
   "ocean_shapefile_path": "ne_10m_ocean/ne_10m_ocean.shp",
-  "out_path": "/global/cfs/cdirs/e3sm/landgen/output_aldivi",
+  "out_path": "/lcrc/group/e3sm/landgen/output_aldivi",
   "modules": [
     {
       "name": "topography",

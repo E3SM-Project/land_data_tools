@@ -97,7 +97,11 @@ Key fields in `config.json`:
 
 ### Grid definition
 
+The `landgen` grid is defined by a netcdf file that includes a set of variables defining approximate cell-centers, vertices, areas, and ids for a set of specified cells.
+For efficiency we recommend an unstructured grid that includes only land-relevant cells. Land-relevant means all land cells, including antarctica and its ice shelves (or no ice shelves if they are not handled by the land model), plus a coastal buffer beyond these cells. The buffer ensures complete global coverage when converted to coarser resolution model grids, such that there are no gaps between the land and ocean grids.
+The default grid is an equal-area [HEALpix](https://healpix.sourceforge.io) grid with ~1.6 km per side (2.53 km^2) and a 50 km coastal buffer. The file is in scrip format so that it can be used by standard remapping tools. The file contents are:
 
+Todo: make a table
 
 ### Modules
 
@@ -140,7 +144,6 @@ Additional module-specific input parameters (in `params`) are tabulated below fo
 | `crop`, `urban`, `lake`, `ice`, `wetland`, `veg_char` | — | — | — (not yet configured) |
 
 
-
 | `soil` `params` | Sub-fields | Description |
 |---|---|---|
 | `decomp_box_size_degrees` | none | Spatial decomposition chunk size in degrees (default: 10) |
@@ -156,7 +159,6 @@ Additional module-specific input parameters (in `params`) are tabulated below fo
 |---|---|---|
 | `decomp_box_size_degrees` | none | Spatial decomposition chunk size in degrees (default: 10) |
 | `TBD` | `TBD` | Atmospheric forcing-related land properties |
-
 
 ---
 
@@ -192,6 +194,8 @@ Each module has a specified netcdf output data file (see [Modules](#modules) for
 
 Will need to create the list of variables for each module (see the confluence page for the mksurfdata api). Maybe do this via agent after all the ouput data structurs are developed.
 
+---
+
 ## Visualizing output data
 
 `plot_landgen.py` is both a library for use within `landgen` and a standalone script that can be called independently to plot data from the module output netcdf files. First load the environement and landgen code into the working shell:
@@ -220,11 +224,25 @@ python -m landgen.plot_landgen <file_path> <out_path> <year> [options]
 | `--ll-limits` | Spatial subset as `MIN_LAT MAX_LAT MIN_LON MAX_LON`; default uses full extent |
 | `--scale-limits` | Colorscale bounds as `VMIN VMAX`; default uses data min/max |
 
+---
+
 ## Contributing
 
-This package is developed as part of the E3SM project. 
+For now, contributions are restricted to land data development team members as part of the E3SM project.
 
-Need to add specific contribution guide for landgen and mksurfdata. Also becauase this dev is separate from E3SM, the contribution guidelines do not necessarily apply.
+### Creating a development branch
+
+When creating a development branch, use the following convention:
+
+`git checkout -b <username>_landgen_<desc-tag>`
+
+Where `<username>` is your github handle and `<desc-tag>` is a short descriptor of the development feature.
+
+For example: `git checkout -b aldivi_landgen_landcover`
+
+### Committing code
+
+You can ensure a commit is for `landgen` by simply navigating to the top-level repository directory `land_data_tools` and first entering `git add landgen` then entering `git commit -a`.
 
 ---
 
@@ -237,6 +255,6 @@ Need to add specific contribution guide for landgen and mksurfdata. Also becauas
 
 ## License
 
-Actually the e3sm license will not explicitly apply when we put this in a separate repo. So need to set up a new one.
+`landgen` is released under a 3-Clause BSD Open Source license. See land_data_tools/LICENSE for details.
 
-See the E3SM [LICENSE](../../../../LICENSE) file. Need to point to or copy the license file.
+---
