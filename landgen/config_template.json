@@ -5,13 +5,13 @@
   "landgen_grid_path": "healpix/10km/land_domain_file_healpix_10km.nc",
   "ocean_shapefile_path": "ne_10m_ocean/ne_10m_ocean.shp",
   "out_path": "/global/cfs/cdirs/e3sm/landgen/output_test",
-  "decomp_box_size_degrees": 10,
   "modules": [
     {
       "name": "topography",
       "params": {
         "active": true,
-        "out_fname": "landgen_topography.nc"
+        "out_fname": "landgen_topography.nc",
+        "decomp_box_size_degrees": 10
       }
     },
     {
@@ -26,7 +26,7 @@
           "lake": false,
           "ice": false,
           "wetland": false,
-          "management": false,
+          "management": true,
           "veg_char": false
         },
         "submod_dyn": {
@@ -39,42 +39,58 @@
           "management": true,
           "veg_char": false
         },
-        "lc_rs_path": "/global/cfs/cdirs/e3sm/landgen/rawdata/modis",
-        "lc_rs_name": "modis",
-        "crop_path": "",
-        "urban_path": "",
-        "lake_path": "",
-        "ice_path": "",
-        "wetland_path": "",
-        "management_path": "/global/cfs/cdirs/e3sm/landgen/rawdata/LUH2/LUH2_v2h",
-        "management_name": "transitions.nc",
-        "grazing_path": "/global/cfs/cdirs/e3sm/landgen/rawdata/HYDE3.5/original/gbc2025_7apr_base/NetCDF",
-        "grazing_names": {
-          "pasture": "pasture.nc",
-          "rangeland": "rangeland.nc"
+        "submod_sources": {
+          "landcover": {
+            "rs_data": {"path": "modis", "name": "modis"}
+          },
+          "crop":    {},
+          "urban":   {},
+          "lake":    {},
+          "ice":     {},
+          "wetland": {},
+          "management": {
+            "harvest": {"path": "LUH2/LUH2_v2h", "name": "transitions.nc"},
+            "grazing": {
+              "path": "HYDE3.5/original/gbc2025_7apr_base/NetCDF",
+              "names": {"pasture": "pasture.nc", "rangeland": "rangeland.nc"}
+            }
+          },
+          "veg_char": {}
         },
-        "veg_char_path": ""
+        "submod_decomp_box_size_degrees": {
+          "landcover": 10,
+          "crop": 10,
+          "urban": 10,
+          "lake": 10,
+          "ice": 10,
+          "wetland": 10,
+          "management": 5,
+          "veg_char": 10
+        }
       }
     },
     {
       "name": "soil",
       "params": {
         "active": true,
-        "out_fname": "landgen_soil.nc"
+        "out_fname": "landgen_soil.nc",
+        "decomp_box_size_degrees": 10
       }
     },
     {
       "name": "human",
       "params": {
         "active": true,
-        "out_fname": "landgen_human.nc"
+        "out_fname": "landgen_human.nc",
+        "decomp_box_size_degrees": 10
       }
     },
     {
       "name": "atmosphere",
       "params": {
         "active": true,
-        "out_fname": "landgen_atmosphere.nc"
+        "out_fname": "landgen_atmosphere.nc",
+        "decomp_box_size_degrees": 10
       }
     }
   ]

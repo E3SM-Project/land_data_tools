@@ -2,19 +2,13 @@
 
 # this module defines the shared data structures and functions for the landgen workflow
 # this includes data shared between modules, and data that are needed for multiprocessing
-# data shared via multiprocessing need to be instantiated as mp.Manager() objects in main()
-# custom data strucures associated managers are also defined and registered here
 
-# the shared custom data structures are registered in main()
-
-import multiprocessing as mp
-from multiprocessing import Lock
-from multiprocessing.managers import BaseManager
 import numpy as np
 
 # set some default dimension sizes here for reference; these can be changed at allocation time
 # see classes below for descriptions of these dimensions
-## todo: add these to the config file and pass them to allocate()
+## todo: add these to the config file and pass them to allocate()?
+## todo: adjust these for landgen data values, rather than elm values
 
 # LtData dimensions
 n_pfts_default = 51
@@ -79,34 +73,7 @@ class GridData:
         self.lon_vtx  = np.zeros((n_cells, n_vertices), dtype=np.float64)
         self.lat_vtx  = np.zeros((n_cells, n_vertices), dtype=np.float64)
 
-    # --- getter methods (needed for proxy access via GridManager) ---
-    def get_cell_id(self):   return self.cell_id
-    def get_lon_cen(self):    return self.lon_cen
-    def get_lat_cen(self):    return self.lat_cen
-    def get_cell_area(self): return self.cell_area
-    def get_landfrac(self):  return self.landfrac
-    def get_lon_vtx(self):   return self.lon_vtx
-    def get_lat_vtx(self):   return self.lat_vtx
-    def get_num_cells(self): return self.num_cells
 
-    # --- setter methods (needed for proxy access via GridManager) ---
-    def set_cell_id(self, v):   self.cell_id   = v
-    def set_lon_cen(self, v):    self.lon_cen    = v
-    def set_lat_cen(self, v):    self.lat_cen    = v
-    def set_cell_area(self, v): self.cell_area = v
-    def set_landfrac(self, v):  self.landfrac  = v
-    def set_lon_vtx(self, v):   self.lon_vtx   = v
-    def set_lat_vtx(self, v):   self.lat_vtx   = v
-
-
-# ---------------------------------------------------------------------------
-# GridManager: custom BaseManager that can vend GridData proxy objects to
-# worker processes.  Register, instantiate, and start in landgen.main().
-# ---------------------------------------------------------------------------
-class GridManager(BaseManager):
-    pass
-
-GridManager.register('GridData', GridData)
 
 # ---------------------------------------------------------------------------
 # TopoData: custom data structure for topography data shared across
@@ -143,16 +110,6 @@ class TopoData:
         self.sky_view        = np.zeros(g,              dtype=np.float64)
         self.terrain_config  = np.zeros(g,              dtype=np.float64)
         self.fmax            = np.zeros(g,              dtype=np.float64)
-
-
-# ---------------------------------------------------------------------------
-# TopoManager: custom BaseManager that can vend TopoData proxy objects to
-# worker processes.  Register, instantiate, and start in landgen.main().
-# ---------------------------------------------------------------------------
-class TopoManager(BaseManager):
-    pass
-
-TopoManager.register('TopoData', TopoData)
 
 
 ## todo: add some aggregate land cover arrays to ltData for the simple land cover data
@@ -305,29 +262,6 @@ class LtData:
         self.cv_wall            = np.zeros((n_cells, n_levurb),   dtype=np.float64)
         self.cv_improad         = np.zeros((n_cells, n_levurb),   dtype=np.float64)
 
-## todo: delete these if we are not using the manager proxy
-    # getter methods for manager proxy
-    def get_harvest_frac(self):  return self.harvest_frac
-    def get_harvest_mass(self):  return self.harvest_mass
-    def get_grazing_frac(self):  return self.grazing_frac
-    def get_pct_pft(self):       return self.pct_pft
-    def get_pct_ocean(self):     return self.pct_ocean
-    def get_pct_lake(self):      return self.pct_lake
-    def get_pct_wetland(self):   return self.pct_wetland
-    def get_pct_glacier(self):   return self.pct_glacier
-    def get_pct_urban(self):     return self.pct_urban
-
-    # setter methods for manager proxy
-    def set_harvest_frac(self, cell_ids, i, values):
-        self.harvest_frac[cell_ids, i] = values
-    def set_harvest_mass(self, cell_ids, i, values):
-        self.harvest_mass[cell_ids, i] = values
-    def set_grazing_frac(self, cell_ids, i, values):
-        self.grazing_frac[cell_ids, i] = values
-    def set_pct_pft(self, cell_ids, i, values):
-        self.pct_pft[cell_ids, i] = values
-##
-
     def copy_from(self, source, varnames):
         """Copy listed variable values from a chunk LtData object into self.
 
@@ -369,12 +303,3 @@ class LtData:
                 getattr(self, name)[:] = src_val
             else:
                 getattr(self, name)[idx] = src_val
-
-# ---------------------------------------------------------------------------
-# LtManager: custom BaseManager that can vend LtData proxy objects to
-# worker processes.  Register, instantiate, and start in landgen.main().
-# ---------------------------------------------------------------------------
-class LtManager(BaseManager):
-    pass
-
-LtManager.register('LtData', LtData)

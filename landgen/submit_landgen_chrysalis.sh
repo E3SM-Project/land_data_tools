@@ -2,13 +2,12 @@
 #SBATCH --job-name=landgen
 #SBATCH --nodes=1               # Ensure single node
 #SBATCH --ntasks=1              # Run one task (master process)
-##SBATCH --cpus-per-task=128
+#SBATCH --cpus-per-task=128
 #SBATCH --exclusive             # Ensure exclusive access to the node (uses all cpus)
 #SBATCH --mem=0                 # 0=Request all memory in this node (adjust as needed)
 #SBATCH --time=02:00:00
 #SBATCH --account e3sm
 #SBATCH --qos=regular
-#SBATCH --constraint=cpu
 
 # type: sbatch submit_landgen.sh to submit the job to SLURM (in the directory where this script is located)
 
@@ -43,7 +42,7 @@ HALF_LOG_CPUS=$(( (SLURM_CPUS_ON_NODE * 50 + 99) / 100 ))  # 50% of logical core
 P90_LOG_CPUS=$(( (SLURM_CPUS_ON_NODE * 90 + 99) / 100 ))  # 90% of logical cores, rounded up
 
 # set the srun cpus to use per task
-export SRUN_CPUS_PER_TASK=$HALF_LOG_CPUS
+export SRUN_CPUS_PER_TASK=$P90_LOG_CPUS
 
 # Tell Python math and OpenMP to use the requested number of threads
 # set these to 1 so that each process uses one thread on each core
@@ -51,10 +50,13 @@ export SRUN_CPUS_PER_TASK=$HALF_LOG_CPUS
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-#### Activate the landgen conda environment
+#### Prepare the landgen conda environment
 
-module load conda
-conda activate landgen_env
+CONDA=/gpfs/fs1/soft/chrysalis/manual/miniforge3/25.3.1/bin/conda
+
+# redirect package cache and envs to user-writable locations
+export CONDA_PKGS_DIRS=$HOME/.conda/pkgs
+export CONDA_ENVS_DIRS=$HOME/.conda/envs
 
 #### Run the landgen package
 
@@ -68,10 +70,10 @@ INPUT_FILE="config.json"
 # #SBATCH --output cannot reference shell variables, so we use exec to replace
 # this script's file descriptors after reading out_path from config.json.
 # The default slurm-JOBID.out in the submit dir will be created but left empty.
-OUT_PATH=$(python -c "import json,sys; print(json.load(open('${SCRIPT_DIR}/${INPUT_FILE}')).get('out_path','.'))")
+OUT_PATH=$($CONDA run -n landgen_env python -c "import json,sys; print(json.load(open('${SCRIPT_DIR}/${INPUT_FILE}')).get('out_path','.'))")
 mkdir -p "${OUT_PATH}"
 exec > "${OUT_PATH}/slurm-${SLURM_JOB_ID}.out" 2>&1
 # Remove the now-empty default SLURM output file from the submit directory
 rm -f "${SLURM_SUBMIT_DIR}/slurm-${SLURM_JOB_ID}.out"
 
-srun python -m landgen "${SCRIPT_DIR}/${INPUT_FILE}"
+$CONDA run --no-capture-output -n landgen_env srun python -m landgen "${SCRIPT_DIR}/${INPUT_FILE}"

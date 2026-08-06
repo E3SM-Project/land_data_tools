@@ -79,14 +79,23 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     """
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
-    scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
-    tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
+    # NOTE: $SCRATCH is Lustre and can cause I/O stalls with many parallel workers;
+    #   use /tmp (RAM-backed tmpfs on Perlmutter) to test its size limit.
+    #scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
+    #tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
+    tmp_dir = Path(tempfile.mkdtemp(dir='/tmp', prefix=f'management_{year}_'))
+
+    # Change CWD to the worker-local tmp_dir so that uraster's internally-generated
+    # files (intermediate data files, logs) land here rather than in the shared job CWD,
+    # preventing collisions between parallel workers.
+    os.chdir(tmp_dir)
 
     # Read source data (each worker reads its own copy)
-    harvest_data = landgen_io.read_netcdf_ll(year, Path(harvest_path) / harvest_name, LUH2_HARVEST_VARS, ll_limits)
+    source_data_path = Path(com_config_dict['source_data_path'])
+    harvest_data = landgen_io.read_netcdf_ll(year, source_data_path / harvest_path / harvest_name, LUH2_HARVEST_VARS, ll_limits)
     grazing_data = {}
     for stem, grazing_name in grazing_names.items():
-        grazing_data[stem] = landgen_io.read_netcdf_ll(year, Path(grazing_path) / grazing_name, [stem], ll_limits)
+        grazing_data[stem] = landgen_io.read_netcdf_ll(year, source_data_path / grazing_path / grazing_name, [stem], ll_limits)
 
     # Create chunk-sized LtData object
     n_chunk_cells = len(row_indices)
@@ -100,8 +109,12 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
 
     try:
         # Write mesh once per chunk (same approach as landcover.py)
-        mesh_file = tmp_dir / 'mesh.geojson'
-        landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, row_indices)
+        #mesh_file = tmp_dir / 'mesh.geojson'
+        #landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, row_indices)
+        #mesh_file = tmp_dir / 'mesh.gpkg'
+        #landgen_io.write_mesh_to_geopackage(out_grid_data, mesh_file, row_indices)
+        mesh_file = tmp_dir / 'mesh.fgb'
+        landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
         # --- regrid harvest variables ---
         # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
@@ -119,11 +132,13 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 src_tif
             )
             # Regrid using modular function
+            print(f"  [PID {os.getpid()}] regrid_to_mesh START: harvest var={varname} ll_limits={ll_limits}", flush=True)
             regridded = landgen_io.regrid_to_mesh(
                 mesh_file, {varname: src_tif},
                 row_indices, out_grid_data,
                 out_type='data'
             )
+            print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
             chunk_lt_data.harvest_frac[:, i] = regridded
 
         # --- regrid grazing variables ---
@@ -146,11 +161,13 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 src_tif
             )
             # Regrid using modular function
+            print(f"  [PID {os.getpid()}] regrid_to_mesh START: grazing var={stem} ll_limits={ll_limits}", flush=True)
             regridded = landgen_io.regrid_to_mesh(
                 mesh_file, {stem: src_tif},
                 row_indices, out_grid_data,
                 out_type='data'
             )
+            print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  grazing var={stem} ll_limits={ll_limits}", flush=True)
             regridded = regridded / cell_area_km2  # km² → fraction
             np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
             chunk_lt_data.grazing_frac[:, i] = regridded
@@ -168,7 +185,7 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
 ## this sets up the pool and calls the management_process() function for each chunk of data
 
 def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path, grazing_names,
-        com_config_dict, out_grid_data, decomp_indices, decomp_ll_limits):
+        com_config_dict, out_grid_data, decomp_box_size_degrees=10):
 
     print(f"Processing management module with parameters:")
     # todo: print the parameters here
@@ -192,6 +209,13 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     else:
         logger.info(f"Running locally: using {omp_threads_int} workers (mp.cpu_count())")
 
+    # compute local decomp for this submodule using its configured chunk size
+    decomp_indices = []
+    decomp_ll_limits = []
+    landgen_io.set_decomp_cell_idx_ll_limits(
+        out_grid_data, decomp_indices, decomp_ll_limits,
+        decomp_box_size_degrees, com_config_dict['out_path'])
+
     # Build data_chunks from the pre-computed decomp_indices / decomp_ll_limits
     # passed in from landgen.py via land_type.py.  These were produced by
     # set_decomp_cell_idx_ll_limits(), which computes tight vertex bounding boxes
@@ -199,7 +223,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     # raster slice fully covers every polygon in the chunk.
     #
     # decomp_indices contains 0-based row indices into out_grid_data arrays.
-    # write_mesh_to_geojson writes each cell's row index as the GeoJSON cellid property,
+    # write_mesh_to_geopackage writes each cell's row index as the GeoPackage cellid property,
     # so regrid_to_mesh can look up uraster results directly by index.
     data_chunks = []
     for row_indices, ll in zip(decomp_indices, decomp_ll_limits):
