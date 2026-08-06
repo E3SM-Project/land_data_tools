@@ -2,7 +2,7 @@
 #SBATCH --job-name=landgen
 #SBATCH --nodes=1               # Ensure single node
 #SBATCH --ntasks=1              # Run one task (master process)
-#SBATCH --cpus-per-task=128
+##SBATCH --cpus-per-task=128
 #SBATCH --exclusive             # Ensure exclusive access to the node (uses all cpus)
 #SBATCH --mem=0                 # 0=Request all memory in this node (adjust as needed)
 #SBATCH --time=02:00:00
@@ -43,7 +43,7 @@ HALF_LOG_CPUS=$(( (SLURM_CPUS_ON_NODE * 50 + 99) / 100 ))  # 50% of logical core
 P90_LOG_CPUS=$(( (SLURM_CPUS_ON_NODE * 90 + 99) / 100 ))  # 90% of logical cores, rounded up
 
 # set the srun cpus to use per task
-export SRUN_CPUS_PER_TASK=$P90_LOG_CPUS
+export SRUN_CPUS_PER_TASK=$HALF_LOG_CPUS
 
 # Tell Python math and OpenMP to use the requested number of threads
 # set these to 1 so that each process uses one thread on each core

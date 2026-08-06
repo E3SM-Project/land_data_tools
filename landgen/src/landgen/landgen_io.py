@@ -878,6 +878,72 @@ def write_mesh_to_geopackage(out_grid_data, tmp_path, cell_indices=None):
     return tmp_path
 
 #--------------------------------------------------------------------------
+def write_mesh_to_flatgeobuf(out_grid_data, tmp_path, cell_indices=None):
+    """
+    Write mesh cells from a GridData object to a FlatGeobuf file.
+
+    FlatGeobuf is a binary flat-file format with no SQLite dependency, so it
+    requires no POSIX file locks and is safe to write from many parallel
+    workers on Lustre (unlike GeoPackage).  It also supports NULL field values,
+    avoiding the NaN-in-GeoJSON problem that motivated the GeoPackage switch.
+
+    Args:
+        out_grid_data (GridData): Populated grid geometry object.
+        tmp_path (str|Path):      Full path of the output .fgb file to write.
+        cell_indices (tuple|array-like|None): 0-based indices into the
+                                  out_grid_data arrays selecting which cells to
+                                  write.  Pass None to write all cells.
+
+    Returns:
+        Path: Path to the written FlatGeobuf file.
+    """
+    if cell_indices is None:
+        idx = np.arange(out_grid_data.num_cells, dtype=np.intp)
+    else:
+        idx = np.asarray(cell_indices, dtype=np.intp)
+
+    if idx.size == 0:
+        raise ValueError("write_mesh_to_flatgeobuf: cell_indices is empty — no cells to write")
+
+    lon_vtx = out_grid_data.lon_vtx[idx]
+    lat_vtx = out_grid_data.lat_vtx[idx]
+
+    tmp_path = Path(tmp_path)
+    tmp_path.parent.mkdir(parents=True, exist_ok=True)
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    driver = ogr.GetDriverByName('FlatGeobuf')
+    ds = driver.CreateDataSource(str(tmp_path))
+
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+
+    layer = ds.CreateLayer('mesh', srs=srs, geom_type=ogr.wkbPolygon)
+    layer.CreateField(ogr.FieldDefn('cellid', ogr.OFTInteger))
+
+    layer_defn = layer.GetLayerDefn()
+    for i in range(len(idx)):
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for v in range(lon_vtx.shape[1]):
+            ring.AddPoint_2D(float(lon_vtx[i, v]), float(lat_vtx[i, v]))
+        ring.AddPoint_2D(float(lon_vtx[i, 0]), float(lat_vtx[i, 0]))   # close ring
+
+        poly = ogr.Geometry(ogr.wkbPolygon)
+        poly.AddGeometry(ring)
+
+        feature = ogr.Feature(layer_defn)
+        feature.SetGeometry(poly)
+        feature.SetField('cellid', int(idx[i]))
+        layer.CreateFeature(feature)
+        feature = None
+
+    ds = None   # flush and close
+
+    logger.info(f"write_mesh_to_flatgeobuf: wrote {len(idx)} cells to {tmp_path}")
+    return tmp_path
+
+#--------------------------------------------------------------------------
 def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
                    out_type='path', remap_method=3):
     """
@@ -921,12 +987,14 @@ def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
         raise FileNotFoundError(f"regrid_to_mesh: raster file not found: {raster_path}")
 
     # output file sits next to the mesh file.
-    # GeoPackage (.gpkg) is used instead of GeoJSON because GeoJSON does not
-    # support NaN as a JSON value — GDAL 3.x raises a write error for cells
-    # whose mean is NaN (all source raster pixels were nodata).  GeoPackage
-    # stores NULL for those cells, which are tracked by uraster.
+    # FlatGeobuf (.fgb) is used because:
+    #   - GeoJSON does not support NaN (GDAL 3.x raises a write error)
+    #   - GeoPackage is SQLite-based and requires POSIX file locks, which hang
+    #     on Lustre when many parallel workers write simultaneously
+    #   - FlatGeobuf is a plain binary format with no locking and supports NULL
     #out_path = mesh_path.parent / f"{varname}.geojson"
-    out_path = mesh_path.parent / f"{varname}.gpkg"
+    #out_path = mesh_path.parent / f"{varname}.gpkg"
+    out_path = mesh_path.parent / f"{varname}.fgb"
 
     config = {
         'sFilename_source_mesh':   str(mesh_path),
@@ -954,7 +1022,7 @@ def regrid_to_mesh(mesh_file_path, var_file_path, cell_indices, out_grid_data,
     if out_type == 'path':
         return out_path
 
-    # out_type == 'data': read output GeoPackage and align values to cell_indices order.
+    # out_type == 'data': read output FlatGeobuf and align values to cell_indices order.
     # NULL mean values (cells where all source raster pixels were nodata) are mapped to 0.0.
     ds_ogr = ogr.Open(str(out_path))
     if ds_ogr is None:

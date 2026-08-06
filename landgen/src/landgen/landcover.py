@@ -9,6 +9,7 @@ import multiprocessing as mp
 import logging
 import shutil
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from . import shared_data
@@ -56,8 +57,11 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     # Determine a scratch base directory for worker-local temporary files.
     # Priority: $SCRATCH (NERSC/HPC) -> $TMPDIR -> system default (usually /tmp).
     # Each worker gets its own subdirectory to avoid cross-worker file collisions.
-    scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
-    tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'landcover_{year}_'))
+    # NOTE: $SCRATCH is Lustre and can cause I/O stalls with many parallel workers;
+    #   use /tmp (RAM-backed tmpfs on Perlmutter) to test its size limit.
+    #scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
+    #tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'landcover_{year}_'))
+    tmp_dir = Path(tempfile.mkdtemp(dir='/tmp', prefix=f'landcover_{year}_'))
 
     # Change CWD to the worker-local tmp_dir so that uraster's internally-generated
     # files (intermediate data files, logs) land here rather than in the shared job CWD,
@@ -84,8 +88,10 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         # first write the mesh file for this chunk
         #mesh_file = Path(tmp_dir) / 'mesh.geojson'
         #landgen_io.write_mesh_to_geojson(out_grid_data, mesh_file, cell_indices)
-        mesh_file = Path(tmp_dir) / 'mesh.gpkg'
-        landgen_io.write_mesh_to_geopackage(out_grid_data, mesh_file, cell_indices)
+        #mesh_file = Path(tmp_dir) / 'mesh.gpkg'
+        #landgen_io.write_mesh_to_geopackage(out_grid_data, mesh_file, cell_indices)
+        mesh_file = Path(tmp_dir) / 'mesh.fgb'
+        landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, cell_indices)
 
         # create a local data structure just for this chunk; only allocate the
         # fields this module actually writes to minimise per-chunk memory usage.
@@ -305,9 +311,6 @@ def run(lt_year_data, year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     resource_logger.info(f"In landcover submodule run():\n"
         f"Submitting {len(data_chunks)} landcover chunks to pool of {cpus_avail_int} workers")
 
-    # Use imap_unordered so each chunk result is copied into lt_year_data and
-    # discarded as soon as it arrives, keeping only ~1 chunk result in memory
-    # at a time instead of accumulating all 360 simultaneously.
     updated_vars = ['pct_pft', 'pct_ocean']
     with mp.Pool(processes=cpus_avail_int) as pool:
         for chunk_result in pool.imap_unordered(_landcover_process_star, data_chunks):
