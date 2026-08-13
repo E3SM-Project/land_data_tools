@@ -59,9 +59,8 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
     # Each worker gets its own subdirectory to avoid cross-worker file collisions.
     # NOTE: $SCRATCH is Lustre and can cause I/O stalls with many parallel workers;
     #   use /tmp (RAM-backed tmpfs on Perlmutter) to test its size limit.
-    #scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
-    #tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'landcover_{year}_'))
-    tmp_dir = Path(tempfile.mkdtemp(dir='/tmp', prefix=f'landcover_{year}_'))
+    scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
+    tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'landcover_{year}_'))
 
     # Change CWD to the worker-local tmp_dir so that uraster's internally-generated
     # files (intermediate data files, logs) land here rather than in the shared job CWD,
@@ -75,10 +74,9 @@ def landcover_process(year, prev_year, prev_fname, lc_rs_path, lc_rs_name,
         tools.init_worker_logging(log_path)
 
     # Redirect uraster's auto-created log files (utility.log, uraster.log, etc.)
-    # from the process CWD into the run output directory.
-    out_path = com_config_dict.get('out_path')
-    if out_path:
-        tools.redirect_uraster_logs(out_path)
+    # into the per-worker tmp_dir so each process writes its own copy and there
+    # are no cross-worker conflicts on shared filesystems.
+    tools.redirect_uraster_logs(tmp_dir)
 
     worker_id = f"{mp.current_process().name} (pid {os.getpid()})"
     logger.info(f"[landcover_process] START  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  worker={worker_id}  year={year}  chunk_size={len(cell_indices)}")

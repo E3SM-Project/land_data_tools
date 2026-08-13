@@ -81,14 +81,18 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
     # each worker writes its temp files to a unique subdirectory to avoid collisions
     # NOTE: $SCRATCH is Lustre and can cause I/O stalls with many parallel workers;
     #   use /tmp (RAM-backed tmpfs on Perlmutter) to test its size limit.
-    #scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
-    #tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
-    tmp_dir = Path(tempfile.mkdtemp(dir='/tmp', prefix=f'management_{year}_'))
+    scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
+    tmp_dir = Path(tempfile.mkdtemp(dir=scratch_base, prefix=f'management_{year}_'))
 
     # Change CWD to the worker-local tmp_dir so that uraster's internally-generated
     # files (intermediate data files, logs) land here rather than in the shared job CWD,
     # preventing collisions between parallel workers.
     os.chdir(tmp_dir)
+
+    # Redirect uraster's auto-created log files (utility.log, uraster.log, etc.)
+    # into the per-worker tmp_dir so each process writes its own copy and there
+    # are no cross-worker conflicts on shared filesystems.
+    tools.redirect_uraster_logs(tmp_dir)
 
     # Read source data (each worker reads its own copy)
     source_data_path = Path(com_config_dict['source_data_path'])
