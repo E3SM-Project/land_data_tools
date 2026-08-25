@@ -26,18 +26,23 @@ def _management_process_star(args):
 ########## define some module-specific constants here
 
 # Default harvest variable names from LUH2 transitions.nc
-LUH2_HARVEST_VARS = [
+LUH2_HARVEST_FRAC_VARS = [
     'primf_harv',   # wood harvest area from primary forest land
     'primn_harv',   # wood harvest area from primary non forest land
     'secmf_harv',   # wood harvest area from secondary mature forest land
     'secyf_harv',   # wood harvest area from secondary young forest land
     'secnf_harv',   # wood harvest area from secondary non forest land
+]
+
+LUH2_HARVEST_MASS_VARS = [
     'primf_bioh',   # wood harvest biomass carbon from primary forest land
     'primn_bioh',   # wood harvest biomass carbon from primary non forest land
     'secmf_bioh',   # wood harvest biomass carbon from secondary mature forest land
     'secyf_bioh',   # wood harvest biomass carbon from secondary young forest land
     'secnf_bioh',   # wood harvest biomass carbon from secondary non forest land
 ]
+
+LUH2_HARVEST_VARS = LUH2_HARVEST_FRAC_VARS + LUH2_HARVEST_MASS_VARS
 
 ########## define helper functions for management run() here
 
@@ -56,7 +61,7 @@ def management_process(year, harvest_path, harvest_name, grazing_path, grazing_n
                       com_config_dict, out_grid_data, ll_limits, row_indices):
     """Compute regridded harvest/grazing for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like landcover.py).
-    Returns chunk LtData object with cell_idx, harvest_frac, and grazing_frac populated.
+    Returns chunk LtData object with cell_idx, harvest_frac, harvest_mass, and grazing_frac populated.
     """
     t0 = time.time()
     try:
@@ -103,12 +108,14 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
 
     # Create chunk-sized LtData object
     n_chunk_cells = len(row_indices)
-    n_harvest = len(LUH2_HARVEST_VARS)
+    n_harvest_frac = len(LUH2_HARVEST_FRAC_VARS)
+    n_harvest_mass = len(LUH2_HARVEST_MASS_VARS)
     n_grazing = len(grazing_names)
 
     chunk_lt_data = LtData()
     chunk_lt_data.cell_idx     = np.array(row_indices, dtype=np.int64)
-    chunk_lt_data.harvest_frac = np.zeros((n_chunk_cells, n_harvest), dtype=np.float64)
+    chunk_lt_data.harvest_frac = np.zeros((n_chunk_cells, n_harvest_frac), dtype=np.float64)
+    chunk_lt_data.harvest_mass = np.zeros((n_chunk_cells, n_harvest_mass), dtype=np.float64)
     chunk_lt_data.grazing_frac = np.zeros((n_chunk_cells, n_grazing), dtype=np.float64)
 
     try:
@@ -120,12 +127,10 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
         mesh_file = tmp_dir / 'mesh.fgb'
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
-        # --- regrid harvest variables ---
-        # LUH2_HARVEST_VARS order matches the n_harvest=10 dimension in LtData:
+        # --- regrid harvest fraction variables ---
+        # LUH2_HARVEST_FRAC_VARS order matches the n_harvest=10 dimension in LtData:
         #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
-        # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
-        #  Note that the biomass carbon variables (primf_bioh, etc) are not currently used in mksurfdat, but we regrid them here for completeness and potential future use.
-        for i, varname in enumerate(LUH2_HARVEST_VARS):
+        for i, varname in enumerate(LUH2_HARVEST_FRAC_VARS):
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{varname}.tif"
             landgen_io.write_latlon_to_geotiff(
@@ -144,6 +149,30 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
             chunk_lt_data.harvest_frac[:, i] = regridded
+
+        # --- regrid harvest biomass variables ---
+        # LUH2_HARVEST_MASS_VARS order matches the n_harvest=10 dimension in LtData:
+        # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
+        #  Note that the biomass carbon variables (primf_bioh, etc) are not currently used in mksurfdat, but we regrid them here for completeness and potential future use.
+        for i, varname in enumerate(LUH2_HARVEST_MASS_VARS):
+            # Write source data to GeoTIFF
+            src_tif = tmp_dir / f"{varname}.tif"
+            landgen_io.write_latlon_to_geotiff(
+                harvest_data[varname],
+                harvest_data['lat'],
+                harvest_data['lon'],
+                ll_limits,
+                src_tif
+            )
+            # Regrid using modular function
+            print(f"  [PID {os.getpid()}] regrid_to_mesh START: harvest var={varname} ll_limits={ll_limits}", flush=True)
+            regridded = landgen_io.regrid_to_mesh(
+                mesh_file, {varname: src_tif},
+                row_indices, out_grid_data,
+                out_type='data'
+            )
+            print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
+            chunk_lt_data.harvest_mass[:, i] = regridded
 
         # --- regrid grazing variables ---
         # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
@@ -246,7 +275,7 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
     n_chunks = len(data_chunks)
     print(f"  Submitting {n_chunks} management chunks to pool of {omp_threads_int} workers")
 
-    updated_vars = ['harvest_frac', 'grazing_frac']
+    updated_vars = ['harvest_frac', 'harvest_mass', 'grazing_frac']
     with mp.Pool(processes=omp_threads_int) as pool:
         for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)

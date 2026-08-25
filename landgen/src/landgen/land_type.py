@@ -205,12 +205,13 @@ def run(active, out_fname, submod_run, submod_dyn,
         # Variables to write to output NetCDF:
         #   pct_pft: landcover percentages [n_cells, n_pfts]
         #   pct_ocean: ocean percentage [n_cells]
-        #   harvest_frac: harvest fractions from LUH2 [n_cells, n_harvest=10]
+        #   harvest_frac: harvest fractions from LUH2 [n_cells, n_harvest=5]
+        #   harvest_mass: harvest biomass from LUH2 [n_cells, n_harvest=5]
         #   grazing_frac: grazing fractions from HYDE3.5 [n_cells, n_grazing=2]
         # Variables with time dimension (for annual concatenation with ncrcat):
         #   All of the above vary by year
-        varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'grazing_frac']
-        timevars = ['pct_pft', 'harvest_frac', 'grazing_frac']
+        varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'harvest_mass', 'grazing_frac']
+        timevars = ['pct_pft', 'harvest_frac', 'harvest_mass', 'grazing_frac']
 
         # insert _<year> before the extension (or at the end if no extension)
         out_fname_p = Path(out_fname)
