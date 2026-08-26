@@ -128,7 +128,7 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
         # --- regrid harvest fraction variables ---
-        # LUH2_HARVEST_FRAC_VARS order matches the n_harvest=10 dimension in LtData:
+        # LUH2_HARVEST_FRAC_VARS order matches the n_harvest_frac=5 dimension in LtData:
         #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
         for i, varname in enumerate(LUH2_HARVEST_FRAC_VARS):
             # Write source data to GeoTIFF
@@ -151,7 +151,7 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
             chunk_lt_data.harvest_frac[:, i] = regridded
 
         # --- regrid harvest biomass variables ---
-        # LUH2_HARVEST_MASS_VARS order matches the n_harvest=10 dimension in LtData:
+        # LUH2_HARVEST_MASS_VARS order matches the n_harvest_mass=5 dimension in LtData:
         # 5: primf_bioh, 6: primn_bioh, 7: secmf_bioh, 8: secyf_bioh, 9: secnf_bioh
         #  Note that the biomass carbon variables (primf_bioh, etc) are not currently used in mksurfdat, but we regrid them here for completeness and potential future use.
         for i, varname in enumerate(LUH2_HARVEST_MASS_VARS):

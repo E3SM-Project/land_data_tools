@@ -205,8 +205,8 @@ def run(active, out_fname, submod_run, submod_dyn,
         # Variables to write to output NetCDF:
         #   pct_pft: landcover percentages [n_cells, n_pfts]
         #   pct_ocean: ocean percentage [n_cells]
-        #   harvest_frac: harvest fractions from LUH2 [n_cells, n_harvest=5]
-        #   harvest_mass: harvest biomass from LUH2 [n_cells, n_harvest=5]
+        #   harvest_frac: harvest fractions from LUH2 [n_cells, n_harvest_frac=5]
+        #   harvest_mass: harvest biomass from LUH2 [n_cells, n_harvest_mass=5]
         #   grazing_frac: grazing fractions from HYDE3.5 [n_cells, n_grazing=2]
         # Variables with time dimension (for annual concatenation with ncrcat):
         #   All of the above vary by year
