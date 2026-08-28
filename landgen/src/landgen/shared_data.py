@@ -12,7 +12,8 @@ import numpy as np
 
 # LtData dimensions
 n_pfts_default = 51
-n_harvest_default = 10
+n_harvest_frac_default = 5
+n_harvest_mass_default = 5
 n_grazing_default = 2
 n_elev_default = 61
 n_elev_edges_default = 62
@@ -121,7 +122,8 @@ class TopoData:
 # These data are on the landgen grid defined by GridData 
 # n_cells: number of 'land' cells in the landgen grid
 # n_pfts: number of plant functional types (51, includes bare and crop functional types)
-# n_harvest: number of harvest types (10: luh categories)
+# n_harvest_frac: number of harvest fraction types (5: luh categories)
+# n_harvest_mass: number of harvest biomass types (5: luh categories)
 # n_grazing: number of grazing types (2: pasture (grass, intensive) and rangeland)
 # n_elev: number of elevation bins for glacier cover (currently 61, may change)
 # n_elev_edges: number of elevation bin edges for glacier cover (n_elev + 1)
@@ -172,8 +174,8 @@ class LtData:
         self.pct_pft            = None         # [n_cells, n_pfts]
         self.nfert              = None         # [n_cells, n_pfts]
         self.pfert              = None         # [n_cells, n_pfts]
-        self.harvest_frac       = None         # [n_cells, n_harvest]
-        self.harvest_mass       = None         # [n_cells, n_harvest]
+        self.harvest_frac       = None         # [n_cells, n_harvest_frac]
+        self.harvest_mass       = None         # [n_cells, n_harvest_mass]
         self.grazing_frac       = None         # [n_cells, n_grazing]
         self.pct_glc_gic        = None         # [n_cells, n_elev]
         self.pct_glc_icesheet   = None         # [n_cells, n_elev]
@@ -200,7 +202,7 @@ class LtData:
         self.cv_wall            = None         # [n_cells, n_levurb]
         self.cv_improad         = None         # [n_cells, n_levurb]
 
-    def allocate(self, n_cells=n_cells_default, n_pfts=n_pfts_default, n_harvest=n_harvest_default,
+    def allocate(self, n_cells=n_cells_default, n_pfts=n_pfts_default, n_harvest_frac=n_harvest_frac_default, n_harvest_mass=n_harvest_mass_default,
                 n_grazing=n_grazing_default, n_elev=n_elev_default, n_elev_edges=n_elev_edges_default,
                 n_density=n_density_default, n_month=n_month_default, n_levurb=n_levurb_default,
                 n_rad=n_rad_default, n_solar=n_solar_default, n_vocveg=n_vocveg_default):
@@ -238,8 +240,8 @@ class LtData:
         self.pct_pft            = np.zeros((n_cells, n_pfts),      dtype=np.float64)
         self.nfert              = np.zeros((n_cells, n_pfts),      dtype=np.float64)
         self.pfert              = np.zeros((n_cells, n_pfts),      dtype=np.float64)
-        self.harvest_frac       = np.zeros((n_cells, n_harvest),  dtype=np.float64)
-        self.harvest_mass       = np.zeros((n_cells, n_harvest),  dtype=np.float64)
+        self.harvest_frac       = np.zeros((n_cells, n_harvest_frac),  dtype=np.float64)
+        self.harvest_mass       = np.zeros((n_cells, n_harvest_mass),  dtype=np.float64)
         self.grazing_frac       = np.zeros((n_cells, n_grazing),  dtype=np.float64)
         self.pct_glc_gic        = np.zeros((n_cells, n_elev),     dtype=np.float64)
         self.pct_glc_icesheet   = np.zeros((n_cells, n_elev),     dtype=np.float64)
