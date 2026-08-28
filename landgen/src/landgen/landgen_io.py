@@ -596,8 +596,20 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
     """
     Read variables from a NetCDF file for a given year.
 
+    Handles three kinds of source files, distinguished by whether a 'time'
+    dimension is present and whether year is given:
+      - multi-year file, year given:  the 'time' axis is searched for the calendar year
+      - single-year file with a 'time' axis (e.g. one file per year holding
+        12 monthly slices), year=None: all time steps are returned with the
+        leading time dimension intact — no year matching is done since the
+        year is already fixed by which file was opened.
+      - static file with no 'time' dimension at all:
+        the variable is returned as-is; year is ignored.
+
     Args:
-        year (int): Year to extract.
+        year (int|None): Year to extract via the 'time' axis. Pass None to skip
+                        year matching and return all time steps as-is (or the
+                        bare variable, if the file has no time dimension).
         file_path_name (str or Path): Full path to the NetCDF file.
         variable_names (list or None): Variables to extract. Must be provided.
         ll_limits (tuple/list or None): 4-element (min_lat, max_lat, min_lon, max_lon).
@@ -609,8 +621,10 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
                                         are never dropped.
 
     Returns:
-        dict: {varname: 2D np.ndarray shape (lat, lon)} for the requested year,
-              plus 'lat' and 'lon' coordinate arrays (possibly subsetted).
+        dict: {varname: np.ndarray} plus 'lat' and 'lon' coordinate arrays
+              (possibly subsetted). Array shape is (lat, lon) when a specific
+              year/time index was selected or the file has no time dimension,
+              or (time, lat, lon) when year=None and a time dimension is present.
     """
 
     ncfile = Path(file_path_name)
@@ -625,12 +639,21 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
         raise KeyError(f"read_netcdf_ll: Variable names must be provided in the json input file for {ncfile}. "
                        f"Available variables: {list(ds.data_vars)}")
 
-    time_units = ds['time'].attrs.get('units', None)
-    # _get_year_idx() handles both 'years since' and 'days since' patterns,
-    #    as well as the case of no time units (assumed calendar years)
-    # add cases to _get_year_idx as needed if other time unit patterns are encountered in source data
-    year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
-    logger.info(f"read_netcdf_ll: reading year {year} (time index {year_idx}) from {ncfile}")
+    has_time = 'time' in ds.variables
+    if not has_time or year is None:
+        # static file (no time axis) or caller wants all time steps as-is
+        year_idx = None
+        if year is None and has_time:
+            logger.info(f"read_netcdf_ll: reading all {ds.sizes['time']} time steps from {ncfile}")
+        else:
+            logger.info(f"read_netcdf_ll: reading static field(s) from {ncfile}")
+    else:
+        time_units = ds['time'].attrs.get('units', None)
+        # _get_year_idx() handles both 'years since' and 'days since' patterns,
+        #    as well as the case of no time units (assumed calendar years)
+        # add cases to _get_year_idx as needed if other time unit patterns are encountered in source data
+        year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
+        logger.info(f"read_netcdf_ll: reading year {year} (time index {year_idx}) from {ncfile}")
 
     ####todo: this currently assumes that the variables lat/lon are ~cell centers
     # need to allow for other variable names to represent these coordinates 
@@ -667,7 +690,10 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
         if v not in ds:
             raise KeyError(f"read_netcdf_ll: Variable '{v}' not found in {ncfile}. "
                            f"Available variables: {list(ds.data_vars)}")
-        out[v] = ds[v].isel(time=year_idx).values  # shape: (lat, lon)
+        if year_idx is None:
+            out[v] = ds[v].values  # shape: (time, lat, lon) or (lat, lon) if no time dim
+        else:
+            out[v] = ds[v].isel(time=year_idx).values  # shape: (lat, lon)
 
     ds.close()
     return out

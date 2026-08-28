@@ -124,12 +124,28 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, submod_run, s
                         decomp_box_size_degrees=submod_decomp_box_size_degrees.get('management', 10))
 
     if submod_run['veg_char']:
-        # Process veg-associated data
+        # Process veg-associated data (LAI, SAI, canopy height top/bottom from Li et al.)
         veg_char_src = submod_sources.get('veg_char', {})
-        veg_char_data_src = next(iter(veg_char_src.values()), {})
-        veg_char_path = veg_char_data_src.get('path', '')
+        lai_src = veg_char_src.get('lai', {})
+        lai_path = lai_src.get('path', '')
+        lai_name = lai_src.get('name', '')
+        lai_var = lai_src.get('variable', '')
+        sai_src = veg_char_src.get('sai', {})
+        sai_path = sai_src.get('path', '')
+        sai_name = sai_src.get('name', '')
+        sai_var = sai_src.get('variable', '')
+        height_top_src = veg_char_src.get('canopy_height_top', {})
+        height_top_path = height_top_src.get('path', '')
+        height_top_name = height_top_src.get('name', '')
+        height_top_var = height_top_src.get('variable', '')
+        height_bot_src = veg_char_src.get('canopy_height_bot', {})
+        height_bot_path = height_bot_src.get('path', '')
+        height_bot_name = height_bot_src.get('name', '')
+        height_bot_var = height_bot_src.get('variable', '')
         veg_char = importlib.import_module('landgen.veg_char')
-        veg_char.run(lt_year_data, year, prev_year, veg_char_path, com_config_dict, out_grid_data,
+        veg_char.run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
+                            height_top_path, height_top_name, height_top_var, 
+                            height_bot_path, height_bot_name, height_bot_var, com_config_dict, out_grid_data,
                             decomp_box_size_degrees=submod_decomp_box_size_degrees.get('veg_char', 10))
 
     # Normalize cell
@@ -208,10 +224,13 @@ def run(active, out_fname, submod_run, submod_dyn,
         #   harvest_frac: harvest fractions from LUH2 [n_cells, n_harvest_frac=5]
         #   harvest_mass: harvest biomass from LUH2 [n_cells, n_harvest_mass=5]
         #   grazing_frac: grazing fractions from HYDE3.5 [n_cells, n_grazing=2]
+        #   monthly_lai/monthly_sai: LAI/SAI from Li et al. [n_cells, n_month=12]
+        #   monthly_height_top/monthly_height_bot: canopy height from Li et al. [n_cells] (static)
         # Variables with time dimension (for annual concatenation with ncrcat):
-        #   All of the above vary by year
-        varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'harvest_mass', 'grazing_frac']
-        timevars = ['pct_pft', 'harvest_frac', 'harvest_mass', 'grazing_frac']
+        #   All of the above vary by year, except monthly_height_top/monthly_height_bot (static)
+        varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'harvest_mass', 'grazing_frac',
+                    'monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot']
+        timevars = ['pct_pft', 'harvest_frac', 'harvest_mass', 'grazing_frac', 'monthly_lai', 'monthly_sai']
 
         # insert _<year> before the extension (or at the end if no extension)
         out_fname_p = Path(out_fname)

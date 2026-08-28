@@ -182,10 +182,10 @@ class LtData:
         self.bin_centers        = None         # [n_elev]
         self.bin_edges          = None         # [n_elev_edges]
         self.pct_urban          = None         # [n_cells, n_density]
-        self.monthly_lai        = None         # [n_cells, n_pfts, n_month]
-        self.monthly_sai        = None         # [n_cells, n_pfts, n_month]
-        self.monthly_height_top = None         # [n_cells, n_pfts, n_month]
-        self.monthly_height_bot = None         # [n_cells, n_pfts, n_month]
+        self.monthly_lai        = None         # [n_cells, n_month]
+        self.monthly_sai        = None         # [n_cells, n_month]
+        self.monthly_height_top = None         # [n_cells]
+        self.monthly_height_bot = None         # [n_cells]
         self.veg_voc_emit       = None         # [n_cells, n_vocveg]
 
         # 3-D arrays  [n_cells, n_rad, n_solar]
@@ -248,10 +248,10 @@ class LtData:
         self.bin_centers        = np.zeros(n_elev,          dtype=np.float64)
         self.bin_edges          = np.zeros(n_elev_edges,    dtype=np.float64)
         self.pct_urban          = np.zeros((n_cells, n_density),  dtype=np.float64)
-        self.monthly_lai        = np.zeros((n_cells, n_pfts, n_month), dtype=np.float64)
-        self.monthly_sai        = np.zeros((n_cells, n_pfts, n_month), dtype=np.float64)
-        self.monthly_height_top = np.zeros((n_cells, n_pfts, n_month), dtype=np.float64)
-        self.monthly_height_bot = np.zeros((n_cells, n_pfts, n_month), dtype=np.float64)
+        self.monthly_lai        = np.zeros((n_cells, n_month), dtype=np.float64)
+        self.monthly_sai        = np.zeros((n_cells, n_month), dtype=np.float64)
+        self.monthly_height_top = np.zeros(n_cells, dtype=np.float64)
+        self.monthly_height_bot = np.zeros(n_cells, dtype=np.float64)
         self.veg_voc_emit       = np.zeros((n_cells, n_vocveg),   dtype=np.float64)
         self.alb_improad        = np.zeros((n_cells, n_rad, n_solar), dtype=np.float64)
         self.alb_perroad        = np.zeros((n_cells, n_rad, n_solar), dtype=np.float64)

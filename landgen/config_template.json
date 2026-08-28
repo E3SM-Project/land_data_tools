@@ -55,7 +55,12 @@
               "names": {"pasture": "pasture.nc", "rangeland": "rangeland.nc"}
             }
           },
-          "veg_char": {}
+          "veg_char": {
+            "lai":{"path": "global_1k_surface_parameter/VEGE", "name": "LAI_{year}_1k_c230606.nc", "variable": "LAI"},
+            "sai":{"path": "global_1k_surface_parameter/VEGE", "name": "SAI_{year}_1k_c230606.nc", "variable": "SAI"},
+            "canopy_height_top":{"path": "global_1k_surface_parameter/VEGE", "name":"CANOPY_HEIGHT_TOP_1k_c230606.nc", "variable": "CANOPY_HEIGHT_TOP"},
+            "canopy_height_bot":{"path": "global_1k_surface_parameter/VEGE", "name":"CANOPY_HEIGHT_BOT_1k_c230606.nc", "variable": "CANOPY_HEIGHT_BOT"}
+          }
         },
         "submod_decomp_box_size_degrees": {
           "landcover": 10,
