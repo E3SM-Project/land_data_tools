@@ -230,12 +230,12 @@ def run(active, out_fname, submod_run, submod_dyn,
         #   harvest_mass: harvest biomass from LUH2 [n_cells, n_harvest_mass=5]
         #   grazing_frac: grazing fractions from HYDE3.5 [n_cells, n_grazing=2]
         #   monthly_lai/monthly_sai: LAI/SAI from Li et al. [n_cells, n_month=12]
-        #   monthly_height_top/monthly_height_bot: canopy height from Li et al. [n_cells] (static)
+        #   canopy_height_top/canopy_height_bot: canopy height from Li et al. [n_cells] (static)
         #   veg_voc_emis: isoprene EF from Wang et al. 2024 [n_cells, n_vocveg=4] (static)
         #   Variables with time dimension (for annual concatenation with ncrcat):
-        #   All of the above vary by year, except monthly_height_top/monthly_height_bot/veg_voc_emis (static)
+        #   All of the above vary by year, except canopy_height_top/canopy_height_bot/veg_voc_emis (static)
         varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'harvest_mass', 'grazing_frac',
-                    'monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot', 'veg_voc_emis']
+                    'monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis']
         timevars = ['pct_pft', 'harvest_frac', 'harvest_mass', 'grazing_frac', 'monthly_lai', 'monthly_sai']
 
         # insert _<year> before the extension (or at the end if no extension)

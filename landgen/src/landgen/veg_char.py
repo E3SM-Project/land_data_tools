@@ -29,8 +29,8 @@ N_MONTH = 12
 
 # Li et al. source only covers 2001-2020; requests outside this range are
 # clamped to the nearest boundary year (LAI/SAI filenames embed the year).
-SOURCE_YEAR_MIN = 2015 #2001
-SOURCE_YEAR_MAX = 2016 #2020
+SOURCE_YEAR_MIN = 2001
+SOURCE_YEAR_MAX = 2020
 
 #--------------------------------------------------------------------------
 def _clamp_source_year(year):
@@ -161,7 +161,7 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
     """Compute regridded LAI/SAI (and canopy height/VOC isoprene EF, first year only) for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like management.py).
     Returns chunk LtData object with cell_idx, monthly_lai, monthly_sai, and
-    (first year only) monthly_height_top/monthly_height_bot/veg_voc_emis populated.
+    (first year only) canopy_height_top/canopy_height_bot/veg_voc_emis populated.
     """
     t0 = time.time()
     try:
@@ -209,7 +209,7 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
     chunk_lt_data.cell_idx     = np.array(row_indices, dtype=np.int64)
     chunk_lt_data.monthly_lai  = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
     chunk_lt_data.monthly_sai  = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
-    # monthly_height_top/monthly_height_bot are left as None (skipped by copy_from)
+    # canopy_height_top/canopy_height_bot are left as None (skipped by copy_from)
     # unless this is the first year processed (prev_year is None); lt_year_data
     # persists across years in land_type.py's loop, so the value set on the
     # first year carries forward without recomputation.
@@ -256,8 +256,8 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
 
         # --- canopy height top/bottom: static fields, regrid only on the first year processed ---
         if prev_year is None:
-            chunk_lt_data.monthly_height_top = np.zeros((n_chunk_cells), dtype=np.float64)
-            chunk_lt_data.monthly_height_bot = np.zeros((n_chunk_cells), dtype=np.float64)
+            chunk_lt_data.canopy_height_top = np.zeros((n_chunk_cells), dtype=np.float64)
+            chunk_lt_data.canopy_height_bot = np.zeros((n_chunk_cells), dtype=np.float64)
 
 
             src_file = source_data_path / height_top_path / height_top_name.format(year=src_year)
@@ -271,7 +271,7 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
                 ll_limits,
                 src_tif
             )
-            chunk_lt_data.monthly_height_top[:] = landgen_io.regrid_to_mesh(
+            chunk_lt_data.canopy_height_top[:] = landgen_io.regrid_to_mesh(
                 mesh_file, {height_top_var: src_tif},
                 row_indices, out_grid_data,
                 out_type='data'
@@ -288,7 +288,7 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
                 ll_limits,
                 src_tif
             )
-            chunk_lt_data.monthly_height_bot[:] = landgen_io.regrid_to_mesh(
+            chunk_lt_data.canopy_height_bot[:] = landgen_io.regrid_to_mesh(
                 mesh_file, {height_bot_var: src_tif},
                 row_indices, out_grid_data,
                 out_type='data'
@@ -373,12 +373,14 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
     data_chunks.sort(key=lambda t: len(t[-1]), reverse=True)  # row_indices is the last element
 
     n_chunks = len(data_chunks)
+    if prev_year is None and len(voc_names) != lt_year_data.veg_voc_emis.shape[1]:
+        raise ValueError(f"veg_char: voc_names has {len(voc_names)} categories but LtData expects {lt_year_data.veg_voc_emis.shape[1]}")
     print(f"  Submitting {n_chunks} veg_char chunks to pool of {omp_threads_int} workers")
 
-    # monthly_height_top/monthly_height_bot/veg_voc_emis are only populated by workers
+    # canopy_height_top/canopy_height_bot/veg_voc_emis are only populated by workers
     # on the first year (prev_year is None); copy_from silently skips unset (None) attrs
     # for later years, leaving the values set on the first year in place.
-    updated_vars = ['monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot', 'veg_voc_emis']
+    updated_vars = ['monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis']
     with mp.Pool(processes=omp_threads_int) as pool:
         for chunk_lt_data in pool.imap_unordered(_veg_char_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)
