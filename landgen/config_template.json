@@ -59,7 +59,17 @@
             "lai":{"path": "global_1k_surface_parameter/VEGE", "name": "LAI_{year}_1k_c230606.nc", "variable": "LAI"},
             "sai":{"path": "global_1k_surface_parameter/VEGE", "name": "SAI_{year}_1k_c230606.nc", "variable": "SAI"},
             "canopy_height_top":{"path": "global_1k_surface_parameter/VEGE", "name":"CANOPY_HEIGHT_TOP_1k_c230606.nc", "variable": "CANOPY_HEIGHT_TOP"},
-            "canopy_height_bot":{"path": "global_1k_surface_parameter/VEGE", "name":"CANOPY_HEIGHT_BOT_1k_c230606.nc", "variable": "CANOPY_HEIGHT_BOT"}
+            "canopy_height_bot":{"path": "global_1k_surface_parameter/VEGE", "name":"CANOPY_HEIGHT_BOT_1k_c230606.nc", "variable": "CANOPY_HEIGHT_BOT"},
+            "voc": {
+              "path": "fvoc",
+              "names": {
+                "crop": "EFMAP.2019b.GLOBE.0.5deg.2020.crop.nc",
+                "grass": "EFMAP.2019b.GLOBE.0.5deg.2020.grass.nc",
+                "shrub": "EFMAP.2019b.GLOBE.0.5deg.2020.shrub.nc",
+                "tree": "EFMAP.2019b.GLOBE.0.5deg.2020.tree.nc"
+              },
+              "variable": "EF_ISOP"
+            }
           }
         },
         "submod_decomp_box_size_degrees": {

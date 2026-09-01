@@ -10,6 +10,7 @@ from .shared_data import LtData
 from . import landgen_io
 from . import tools
 import numpy as np
+import xarray as xr
 import os
 import traceback
 import time
@@ -31,6 +32,7 @@ N_MONTH = 12
 SOURCE_YEAR_MIN = 2015 #2001
 SOURCE_YEAR_MAX = 2016 #2020
 
+#--------------------------------------------------------------------------
 def _clamp_source_year(year):
     """Clamp year to the [SOURCE_YEAR_MIN, SOURCE_YEAR_MAX] range covered by Li et al., logging a warning if clamped."""
     if year < SOURCE_YEAR_MIN:
@@ -40,6 +42,87 @@ def _clamp_source_year(year):
         logger.warning(f"veg_char: requested year {year} is after source data range; using {SOURCE_YEAR_MAX}")
         return SOURCE_YEAR_MAX
     return year
+
+#--------------------------------------------------------------------------
+def _read_ioapi_ll(file_path_name, variable_names, ll_limits=None):
+    """
+    Read static variable(s) from an IOAPI-style NetCDF file that has no lat/lon
+    coordinate variables (specific to the Wang et al. 2024 MEGAN EFMAP VOC files).
+
+    The file's IOAPI projection attributes (XORIG/YORIG/XCELL/YCELL, GDTYP=2)
+    are placeholders left over from the MEGAN conversion and do not describe
+    the actual grid; NCOLS/NROWS instead cover a global regular 0.5-degree
+    lat-lon grid. Cell (row=0, col=0) is centered at (-89.75, -179.75),
+    increasing south-to-north and west-to-east (verified against known
+    high-isoprene regions: Amazon, Congo, Indonesia, boreal forest).
+
+    Each variable has a singleton TSTEP and LAY dimension (static, single
+    snapshot), which are squeezed out here.
+
+    Args:
+        file_path_name (str or Path): Full path to the NetCDF file.
+        variable_names (list): Variables to extract. Must be provided.
+        ll_limits (tuple/list or None): 4-element (min_lat, max_lat, min_lon, max_lon).
+                                        When given, only the rows/columns that
+                                        overlap this region are read (see
+                                        landgen_io.read_netcdf_ll for the buffering logic).
+
+    Returns:
+        dict: {varname: np.ndarray [nrows, ncols]} plus 'lat' and 'lon' 1-D
+              coordinate arrays (possibly subsetted).
+    """
+    ncfile = Path(file_path_name)
+    if not ncfile.exists():
+        raise FileNotFoundError(f"_read_ioapi_ll: NetCDF file not found: {ncfile}")
+
+    ds = xr.open_dataset(ncfile, decode_times=False)
+
+    if variable_names is None:
+        raise KeyError(f"_read_ioapi_ll: Variable names must be provided in the json input file for {ncfile}. "
+                       f"Available variables: {list(ds.data_vars)}")
+
+    ncols = int(ds.attrs['NCOLS'])
+    nrows = int(ds.attrs['NROWS'])
+    lat = -90.0 + (np.arange(nrows) + 0.5) * 0.5
+    lon = -180.0 + (np.arange(ncols) + 0.5) * 0.5
+
+    # if ll_limits=None, do not subset the data; otherwise subset by ll_limits
+    if ll_limits is not None:
+        min_lat, max_lat, min_lon, max_lon = ll_limits
+
+        # add a one-cell buffer so cells that straddle the boundary are included
+        lat_step = 0.5
+        lon_step = 0.5
+
+        lat_mask = (lat >= min_lat - lat_step) & (lat <= max_lat + lat_step)
+        lon_mask = (lon >= min_lon - lon_step) & (lon <= max_lon + lon_step)
+
+        lat_idx = np.where(lat_mask)[0]
+        lon_idx = np.where(lon_mask)[0]
+
+        if lat_idx.size == 0 or lon_idx.size == 0:
+            raise ValueError(
+                f"_read_ioapi_ll: No grid cells found within ll_limits {ll_limits} in {ncfile}. "
+                f"lat range: [{lat.min():.2f}, {lat.max():.2f}], "
+                f"lon range: [{lon.min():.2f}, {lon.max():.2f}]"
+            )
+
+        lat = lat[lat_idx]
+        lon = lon[lon_idx]
+
+    out = {'lat': lat, 'lon': lon}
+    for v in variable_names:
+        if v not in ds:
+            raise KeyError(f"_read_ioapi_ll: Variable '{v}' not found in {ncfile}. "
+                           f"Available variables: {list(ds.data_vars)}")
+        data = ds[v].isel(TSTEP=0, LAY=0).values  # (ROW, COL) -> squeeze static singleton dims
+        if ll_limits is not None:
+            data = data[np.ix_(lat_idx, lon_idx)]
+        out[v] = data
+
+    ds.close()
+    return out
+#--------------------------------------------------------------------------
 
 ########## define helper functions for veg_char run() here
 
@@ -60,6 +143,10 @@ def _clamp_source_year(year):
 # height_bot_path: directory (relative to source_data_path) holding the static canopy height files
 # height_bot_name: filename (source NetCDF variable name is CANOPY_HEIGHT_BOT)
 # height_bot_var: source NetCDF variable name for bottom canopy height (usually CANOPY_HEIGHT_BOT)
+# voc_path: directory (relative to source_data_path) holding the VOC EFMAP files
+# voc_names: dict {category: filename}, one file per land-cover category; dict order
+#             defines the veg_voc_emis column index for each category
+# voc_var: source NetCDF variable name to extract from each VOC file (isoprene EF is EF_ISOP)
 # com_config_dict: shared dictionary for common parameters for all modules
 # out_grid_data: shared data structure for the landgen grid data
 # ll_limits, row_indices: chunk spatial bounds and cell indices (see set_decomp_cell_idx_ll_limits)
@@ -69,11 +156,12 @@ def _clamp_source_year(year):
 def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
                      height_top_path, height_top_name, height_top_var,
                      height_bot_path, height_bot_name, height_bot_var,
+                     voc_path, voc_names, voc_var,
                      com_config_dict, out_grid_data, ll_limits, row_indices):
-    """Compute regridded LAI/SAI (and canopy height, first year only) for one spatial chunk.
+    """Compute regridded LAI/SAI (and canopy height/VOC isoprene EF, first year only) for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like management.py).
     Returns chunk LtData object with cell_idx, monthly_lai, monthly_sai, and
-    (first year only) monthly_height_top/monthly_height_bot populated.
+    (first year only) monthly_height_top/monthly_height_bot/veg_voc_emis populated.
     """
     t0 = time.time()
     try:
@@ -81,6 +169,7 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
             year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
             height_top_path, height_top_name, height_top_var,
             height_bot_path, height_bot_name, height_bot_var,
+            voc_path, voc_names, voc_var,
             com_config_dict, ll_limits, row_indices, out_grid_data
         )
     except Exception:
@@ -93,6 +182,7 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
 def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
                            height_top_path, height_top_name, height_top_var,
                            height_bot_path, height_bot_name, height_bot_var,
+                           voc_path, voc_names, voc_var,
                            com_config_dict, ll_limits, row_indices, out_grid_data):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk LtData.
     Each worker does its own I/O (simple starmap approach like management.py).
@@ -204,12 +294,32 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
                 out_type='data'
             )
 
+            # --- VOC isoprene EF (Wang et al. 2024): static, one file per land-cover category ---
+            chunk_lt_data.veg_voc_emis = np.zeros((n_chunk_cells, len(voc_names)), dtype=np.float64)
+            for k, category in enumerate(voc_names):
+                src_file = source_data_path / voc_path / voc_names[category]
+                src_data = _read_ioapi_ll(src_file, [voc_var], ll_limits)
+
+                src_tif = tmp_dir / f"voc_{category}.tif"
+                landgen_io.write_latlon_to_geotiff(
+                    src_data[voc_var],
+                    src_data['lat'],
+                    src_data['lon'],
+                    ll_limits,
+                    src_tif
+                )
+                chunk_lt_data.veg_voc_emis[:, k] = landgen_io.regrid_to_mesh(
+                    mesh_file, {voc_var: src_tif},
+                    row_indices, out_grid_data,
+                    out_type='data'
+                )
+
         return chunk_lt_data
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-
+#--------------------------------------------------------------------------
 ########## run()
 
 ## called by land_type.process_single_year() for each year, and this is where the multiprocessing happens for the veg_char module
@@ -218,6 +328,7 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
 def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
                             height_top_path, height_top_name, height_top_var,
                             height_bot_path, height_bot_name, height_bot_var,
+                            voc_path, voc_names, voc_var,
         com_config_dict, out_grid_data, decomp_box_size_degrees=10):
 
     print(f"Processing veg_char module with parameters:")
@@ -253,6 +364,7 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
             year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
                             height_top_path, height_top_name, height_top_var,
                             height_bot_path, height_bot_name, height_bot_var,
+                            voc_path, voc_names, voc_var,
             com_config_dict, out_grid_data, ll, row_indices
         ))
 
@@ -263,10 +375,10 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
     n_chunks = len(data_chunks)
     print(f"  Submitting {n_chunks} veg_char chunks to pool of {omp_threads_int} workers")
 
-    # monthly_height_top/monthly_height_bot are only populated by workers on the
-    # first year (prev_year is None); copy_from silently skips unset (None) attrs
+    # monthly_height_top/monthly_height_bot/veg_voc_emis are only populated by workers
+    # on the first year (prev_year is None); copy_from silently skips unset (None) attrs
     # for later years, leaving the values set on the first year in place.
-    updated_vars = ['monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot']
+    updated_vars = ['monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot', 'veg_voc_emis']
     with mp.Pool(processes=omp_threads_int) as pool:
         for chunk_lt_data in pool.imap_unordered(_veg_char_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)

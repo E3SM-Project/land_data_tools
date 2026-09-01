@@ -142,10 +142,15 @@ def _process_single_year(lt_year_data, year, prev_year, out_fname, submod_run, s
         height_bot_path = height_bot_src.get('path', '')
         height_bot_name = height_bot_src.get('name', '')
         height_bot_var = height_bot_src.get('variable', '')
+        voc_src = veg_char_src.get('voc', {})
+        voc_path = voc_src.get('path', '')
+        voc_names = voc_src.get('names', {})
+        voc_var = voc_src.get('variable', '')
         veg_char = importlib.import_module('landgen.veg_char')
         veg_char.run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
                             height_top_path, height_top_name, height_top_var, 
-                            height_bot_path, height_bot_name, height_bot_var, com_config_dict, out_grid_data,
+                            height_bot_path, height_bot_name, height_bot_var,
+                            voc_path, voc_names, voc_var, com_config_dict, out_grid_data,
                             decomp_box_size_degrees=submod_decomp_box_size_degrees.get('veg_char', 10))
 
     # Normalize cell
@@ -226,10 +231,11 @@ def run(active, out_fname, submod_run, submod_dyn,
         #   grazing_frac: grazing fractions from HYDE3.5 [n_cells, n_grazing=2]
         #   monthly_lai/monthly_sai: LAI/SAI from Li et al. [n_cells, n_month=12]
         #   monthly_height_top/monthly_height_bot: canopy height from Li et al. [n_cells] (static)
-        # Variables with time dimension (for annual concatenation with ncrcat):
-        #   All of the above vary by year, except monthly_height_top/monthly_height_bot (static)
+        #   veg_voc_emis: isoprene EF from Wang et al. 2024 [n_cells, n_vocveg=4] (static)
+        #   Variables with time dimension (for annual concatenation with ncrcat):
+        #   All of the above vary by year, except monthly_height_top/monthly_height_bot/veg_voc_emis (static)
         varnames = ['pct_pft', 'pct_ocean', 'harvest_frac', 'harvest_mass', 'grazing_frac',
-                    'monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot']
+                    'monthly_lai', 'monthly_sai', 'monthly_height_top', 'monthly_height_bot', 'veg_voc_emis']
         timevars = ['pct_pft', 'harvest_frac', 'harvest_mass', 'grazing_frac', 'monthly_lai', 'monthly_sai']
 
         # insert _<year> before the extension (or at the end if no extension)

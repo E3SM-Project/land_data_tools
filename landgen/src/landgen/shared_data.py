@@ -22,7 +22,7 @@ n_month_default = 12
 n_levurb_default = 10
 n_rad_default = 2
 n_solar_default = 2
-n_vocveg_default = 6
+n_vocveg_default = 4
 
 # GridData dimensions
 n_cells_default = 1
@@ -132,7 +132,7 @@ class TopoData:
 # n_levurb: number of vertical levels in the urban canopy model (10: from the ground up)
 # n_rad: number of radiation bands (2: shortwave and longwave)
 # n_solar: number of solar radiation categories (2: direct and diffuse)
-# n_vocveg: number of vegetation types for VOC emissions (6: 3 tree, shrub, grass, crop)
+# n_vocveg: number of vegetation types for VOC emissions (4: crop, grass, shrub, tree)
 # ---------------------------------------------------------------------------
 class LtData:
     """Per-cell landcover data container for the landgen workflow."""
@@ -186,7 +186,7 @@ class LtData:
         self.monthly_sai        = None         # [n_cells, n_month]
         self.monthly_height_top = None         # [n_cells]
         self.monthly_height_bot = None         # [n_cells]
-        self.veg_voc_emit       = None         # [n_cells, n_vocveg]
+        self.veg_voc_emis       = None         # [n_cells, n_vocveg]
 
         # 3-D arrays  [n_cells, n_rad, n_solar]
         self.alb_improad        = None         # [n_cells, n_rad, n_solar]
@@ -252,7 +252,7 @@ class LtData:
         self.monthly_sai        = np.zeros((n_cells, n_month), dtype=np.float64)
         self.monthly_height_top = np.zeros(n_cells, dtype=np.float64)
         self.monthly_height_bot = np.zeros(n_cells, dtype=np.float64)
-        self.veg_voc_emit       = np.zeros((n_cells, n_vocveg),   dtype=np.float64)
+        self.veg_voc_emis       = np.zeros((n_cells, n_vocveg),   dtype=np.float64)
         self.alb_improad        = np.zeros((n_cells, n_rad, n_solar), dtype=np.float64)
         self.alb_perroad        = np.zeros((n_cells, n_rad, n_solar), dtype=np.float64)
         self.alb_roof           = np.zeros((n_cells, n_rad, n_solar), dtype=np.float64)
