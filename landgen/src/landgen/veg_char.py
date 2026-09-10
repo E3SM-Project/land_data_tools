@@ -158,10 +158,13 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
                      height_bot_path, height_bot_name, height_bot_var,
                      voc_path, voc_names, voc_var,
                      com_config_dict, out_grid_data, ll_limits, row_indices):
-    """Compute regridded LAI/SAI (and canopy height/VOC isoprene EF, first year only) for one spatial chunk.
+    """Compute regridded LAI/SAI/canopy height/VOC isoprene EF (first year only) for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like management.py).
-    Returns chunk LtData object with cell_idx, monthly_lai, monthly_sai, and
-    (first year only) canopy_height_top/canopy_height_bot/veg_voc_emis populated.
+    Returns chunk LtData object with cell_idx populated, and (first year only,
+    i.e. prev_year is None) monthly_lai, monthly_sai, canopy_height_top,
+    canopy_height_bot, veg_voc_emis populated. monthly_lai/monthly_sai are a
+    climatological monthly cycle averaged over com_config_dict['start_year']..
+    ['end_year'] (clamped to the source data range), not a per-year value.
     """
     t0 = time.time()
     try:
@@ -198,67 +201,93 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
 
     source_data_path = Path(com_config_dict['source_data_path'])
 
-    # LAI/SAI are one file per year (20 yearly files, 12 months each); the year is
-    # baked into the filename rather than searched for in the time axis, so
-    # read_netcdf_ll is called with year=None to return all 12 monthly slices.
-    src_year = _clamp_source_year(year)
-
     n_chunk_cells = len(row_indices)
 
     chunk_lt_data = LtData()
-    chunk_lt_data.cell_idx     = np.array(row_indices, dtype=np.int64)
-    chunk_lt_data.monthly_lai  = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
-    chunk_lt_data.monthly_sai  = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
-    # canopy_height_top/canopy_height_bot are left as None (skipped by copy_from)
-    # unless this is the first year processed (prev_year is None); lt_year_data
-    # persists across years in land_type.py's loop, so the value set on the
-    # first year carries forward without recomputation.
+    chunk_lt_data.cell_idx = np.array(row_indices, dtype=np.int64)
+    # monthly_lai/monthly_sai/canopy_height_top/canopy_height_bot/veg_voc_emis are
+    # left as None (skipped by copy_from) unless this is the first year processed
+    # (prev_year is None); lt_year_data persists across years in land_type.py's
+    # loop, so the values set on the first year carry forward without recomputation.
 
     try:
         mesh_file = tmp_dir / 'mesh.fgb'
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
-        # --- regrid LAI, one month at a time ---
-        src_file = source_data_path / lai_path / lai_name.format(year=src_year)
-        src_data = landgen_io.read_netcdf_ll(None, src_file, [lai_var], ll_limits)
-        for month in range(N_MONTH):
-            src_tif = tmp_dir / f"{lai_var}_{month}.tif"
-            landgen_io.write_latlon_to_geotiff(
-                src_data[lai_var][month],
-                src_data['lat'],
-                src_data['lon'],
-                ll_limits,
-                src_tif
-            )
-            chunk_lt_data.monthly_lai[:, month] = landgen_io.regrid_to_mesh(
-                mesh_file, {lai_var: src_tif},
-                row_indices, out_grid_data,
-                out_type='data'
-            )
-
-        # --- regrid SAI, one month at a time ---
-        src_file = source_data_path / sai_path / sai_name.format(year=src_year)
-        src_data = landgen_io.read_netcdf_ll(None, src_file, [sai_var], ll_limits)
-        for month in range(N_MONTH):
-            src_tif = tmp_dir / f"{sai_var}_{month}.tif"
-            landgen_io.write_latlon_to_geotiff(
-                src_data[sai_var][month],
-                src_data['lat'],
-                src_data['lon'],
-                ll_limits,
-                src_tif
-            )
-            chunk_lt_data.monthly_sai[:, month] = landgen_io.regrid_to_mesh(
-                mesh_file, {sai_var: src_tif},
-                row_indices, out_grid_data,
-                out_type='data'
-            )
-
-        # --- canopy height top/bottom: static fields, regrid only on the first year processed ---
         if prev_year is None:
+            chunk_lt_data.monthly_lai = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
+            chunk_lt_data.monthly_sai = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
+
+            # monthly_lai/monthly_sai are a climatological monthly cycle averaged
+            # over the source years spanning [start_year, end_year] (each endpoint
+            # clamped to the Li et al. source range), not a single year's value.
+            # LAI/SAI are one file per source year (12 months each); the source
+            # rasters are averaged across years first (native source resolution),
+            # then the resulting 12 averaged monthly rasters are regridded once,
+            # rather than regridding every year and averaging the regridded output.
+            src_year_start = _clamp_source_year(com_config_dict['start_year'])
+            src_year_end   = _clamp_source_year(com_config_dict['end_year'])
+            src_years = range(src_year_start, src_year_end + 1)
+
+            # --- average LAI across years, then regrid once per month ---
+            lai_sum = None
+            for src_year in src_years:
+                src_file = source_data_path / lai_path / lai_name.format(year=src_year)
+                src_data = landgen_io.read_netcdf_ll(None, src_file, [lai_var], ll_limits)
+                if lai_sum is None:
+                    lai_sum = src_data[lai_var].astype(np.float64)
+                    lai_lat, lai_lon = src_data['lat'], src_data['lon']
+                else:
+                    lai_sum += src_data[lai_var]
+            lai_avg = lai_sum / len(src_years)
+
+            for month in range(N_MONTH):
+                src_tif = tmp_dir / f"{lai_var}_{month}.tif"
+                landgen_io.write_latlon_to_geotiff(
+                    lai_avg[month],
+                    lai_lat,
+                    lai_lon,
+                    ll_limits,
+                    src_tif
+                )
+                chunk_lt_data.monthly_lai[:, month] = landgen_io.regrid_to_mesh(
+                    mesh_file, {lai_var: src_tif},
+                    row_indices, out_grid_data,
+                    out_type='data'
+                )
+
+            # --- average SAI across years, then regrid once per month ---
+            sai_sum = None
+            for src_year in src_years:
+                src_file = source_data_path / sai_path / sai_name.format(year=src_year)
+                src_data = landgen_io.read_netcdf_ll(None, src_file, [sai_var], ll_limits)
+                if sai_sum is None:
+                    sai_sum = src_data[sai_var].astype(np.float64)
+                    sai_lat, sai_lon = src_data['lat'], src_data['lon']
+                else:
+                    sai_sum += src_data[sai_var]
+            sai_avg = sai_sum / len(src_years)
+
+            for month in range(N_MONTH):
+                src_tif = tmp_dir / f"{sai_var}_{month}.tif"
+                landgen_io.write_latlon_to_geotiff(
+                    sai_avg[month],
+                    sai_lat,
+                    sai_lon,
+                    ll_limits,
+                    src_tif
+                )
+                chunk_lt_data.monthly_sai[:, month] = landgen_io.regrid_to_mesh(
+                    mesh_file, {sai_var: src_tif},
+                    row_indices, out_grid_data,
+                    out_type='data'
+                )
+
+            # --- canopy height top/bottom: static fields, regrid only on the first year processed ---
             chunk_lt_data.canopy_height_top = np.zeros((n_chunk_cells), dtype=np.float64)
             chunk_lt_data.canopy_height_bot = np.zeros((n_chunk_cells), dtype=np.float64)
 
+            src_year = _clamp_source_year(year)
 
             src_file = source_data_path / height_top_path / height_top_name.format(year=src_year)
             src_data = landgen_io.read_netcdf_ll(None, src_file, [height_top_var], ll_limits)
