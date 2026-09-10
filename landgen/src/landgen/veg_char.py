@@ -32,6 +32,18 @@ N_MONTH = 12
 SOURCE_YEAR_MIN = 2001
 SOURCE_YEAR_MAX = 2020
 
+# GFED5.1 Ecosystem product (cropland burned area, used to derive abm) covers
+# 2002-2022; abm is always built from this full climatology regardless of
+# start_year/end_year, since a single year (or a short window) under-samples
+# fire-season timing badly compared to the full multi-year record.
+GFED_YEAR_MIN = 2002
+GFED_YEAR_MAX = 2022
+
+# abm fill value for cells with no cropland-fire signal in any month of the
+# GFED5.1 climatology, matching the undocumented convention used by the
+# existing surfdata abm field (values 1-12 = peak month, 13 = no signal).
+ABM_FILL_VALUE = 13.0
+
 #--------------------------------------------------------------------------
 def _clamp_source_year(year):
     """Clamp year to the [SOURCE_YEAR_MIN, SOURCE_YEAR_MAX] range covered by Li et al., logging a warning if clamped."""
@@ -147,6 +159,11 @@ def _read_ioapi_ll(file_path_name, variable_names, ll_limits=None):
 # voc_names: dict {category: filename}, one file per land-cover category; dict order
 #             defines the veg_voc_emis column index for each category
 # voc_var: source NetCDF variable name to extract from each VOC file (isoprene EF is EF_ISOP)
+# abm_path: directory (relative to source_data_path) holding the GFED5.1 Ecosystem yearly files
+# abm_name: filename template with '{year}' (one file per year, 12 monthly slices)
+# abm_var: source NetCDF variable name for cropland burned area (BA_14_Cropland)
+# abm_group: name of the NetCDF4 group holding abm_var (GFED5.1 Ecosystem files
+#             nest the per-ecosystem-class burned area under 'burned_area_partitioning')
 # com_config_dict: shared dictionary for common parameters for all modules
 # out_grid_data: shared data structure for the landgen grid data
 # ll_limits, row_indices: chunk spatial bounds and cell indices (see set_decomp_cell_idx_ll_limits)
@@ -157,14 +174,17 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
                      height_top_path, height_top_name, height_top_var,
                      height_bot_path, height_bot_name, height_bot_var,
                      voc_path, voc_names, voc_var,
+                     abm_path, abm_name, abm_var, abm_group,
                      com_config_dict, out_grid_data, ll_limits, row_indices):
-    """Compute regridded LAI/SAI/canopy height/VOC isoprene EF (first year only) for one spatial chunk.
+    """Compute regridded LAI/SAI/canopy height/VOC isoprene EF/abm (first year only) for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like management.py).
     Returns chunk LtData object with cell_idx populated, and (first year only,
     i.e. prev_year is None) monthly_lai, monthly_sai, canopy_height_top,
-    canopy_height_bot, veg_voc_emis populated. monthly_lai/monthly_sai are a
-    climatological monthly cycle averaged over com_config_dict['start_year']..
-    ['end_year'] (clamped to the source data range), not a per-year value.
+    canopy_height_bot, veg_voc_emis, abm populated. monthly_lai/monthly_sai are
+    a climatological monthly cycle averaged over com_config_dict['start_year']..
+    ['end_year'] (clamped to the source data range), not a per-year value. abm
+    is the month of peak GFED5.1 cropland burned area, from the fixed
+    GFED_YEAR_MIN..GFED_YEAR_MAX climatology (independent of start_year/end_year).
     """
     t0 = time.time()
     try:
@@ -173,6 +193,7 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
             height_top_path, height_top_name, height_top_var,
             height_bot_path, height_bot_name, height_bot_var,
             voc_path, voc_names, voc_var,
+            abm_path, abm_name, abm_var, abm_group,
             com_config_dict, ll_limits, row_indices, out_grid_data
         )
     except Exception:
@@ -186,6 +207,7 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
                            height_top_path, height_top_name, height_top_var,
                            height_bot_path, height_bot_name, height_bot_var,
                            voc_path, voc_names, voc_var,
+                           abm_path, abm_name, abm_var, abm_group,
                            com_config_dict, ll_limits, row_indices, out_grid_data):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk LtData.
     Each worker does its own I/O (simple starmap approach like management.py).
@@ -343,6 +365,47 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
                     out_type='data'
                 )
 
+            # --- abm (agricultural-fire peak month) from GFED5.1 Ecosystem cropland burned area ---
+            # Sum monthly cropland burned area (BA_14_Cropland) over the full
+            # GFED5.1 Ecosystem climatology (GFED_YEAR_MIN..GFED_YEAR_MAX) at
+            # native 0.25-degree resolution, then take the month of maximum
+            # climatological burning per source cell, before regridding once.
+            chunk_lt_data.abm = np.zeros((n_chunk_cells,), dtype=np.float64)
+
+            ba_sum = None
+            for gfed_year in range(GFED_YEAR_MIN, GFED_YEAR_MAX + 1):
+                src_file = source_data_path / abm_path / abm_name.format(year=gfed_year)
+                src_data = landgen_io.read_netcdf_ll(None, src_file, [abm_var], ll_limits, group=abm_group)
+                if ba_sum is None:
+                    ba_sum = src_data[abm_var].astype(np.float64)
+                    ba_lat, ba_lon = src_data['lat'], src_data['lon']
+                else:
+                    ba_sum += src_data[abm_var]
+
+            # peak_month: 1-12 = month of maximum climatological cropland burned
+            # area; ABM_FILL_VALUE = no cropland-fire signal in any month, matching
+            # the fill-value convention of the existing surfdata abm field.
+            peak_month = (np.argmax(ba_sum, axis=0) + 1).astype(np.float64)
+            no_signal = np.all(ba_sum == 0, axis=0)
+            peak_month[no_signal] = ABM_FILL_VALUE
+
+            src_tif = tmp_dir / f"{abm_var}_peak_month.tif"
+            landgen_io.write_latlon_to_geotiff(
+                peak_month,
+                ba_lat,
+                ba_lon,
+                ll_limits,
+                src_tif
+            )
+            # abm is categorical (month index / fill value): nearest-neighbor
+            # regrid (remap_method=1) avoids blending distinct months/fill
+            # values together the way the default area-weighted average would.
+            chunk_lt_data.abm[:] = landgen_io.regrid_to_mesh(
+                mesh_file, {abm_var: src_tif},
+                row_indices, out_grid_data,
+                out_type='data', remap_method=1
+            )
+
         return chunk_lt_data
 
     finally:
@@ -358,6 +421,7 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
                             height_top_path, height_top_name, height_top_var,
                             height_bot_path, height_bot_name, height_bot_var,
                             voc_path, voc_names, voc_var,
+                            abm_path, abm_name, abm_var, abm_group,
         com_config_dict, out_grid_data, decomp_box_size_degrees=10):
 
     print(f"Processing veg_char module with parameters:")
@@ -394,6 +458,7 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
                             height_top_path, height_top_name, height_top_var,
                             height_bot_path, height_bot_name, height_bot_var,
                             voc_path, voc_names, voc_var,
+                            abm_path, abm_name, abm_var, abm_group,
             com_config_dict, out_grid_data, ll, row_indices
         ))
 
@@ -406,10 +471,10 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
         raise ValueError(f"veg_char: voc_names has {len(voc_names)} categories but LtData expects {lt_year_data.veg_voc_emis.shape[1]}")
     print(f"  Submitting {n_chunks} veg_char chunks to pool of {omp_threads_int} workers")
 
-    # canopy_height_top/canopy_height_bot/veg_voc_emis are only populated by workers
-    # on the first year (prev_year is None); copy_from silently skips unset (None) attrs
-    # for later years, leaving the values set on the first year in place.
-    updated_vars = ['monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis']
+    # canopy_height_top/canopy_height_bot/veg_voc_emis/abm are only populated by
+    # workers on the first year (prev_year is None); copy_from silently skips
+    # unset (None) attrs for later years, leaving the first year's values in place.
+    updated_vars = ['monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis', 'abm']
     with mp.Pool(processes=omp_threads_int) as pool:
         for chunk_lt_data in pool.imap_unordered(_veg_char_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)
