@@ -693,10 +693,7 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None, gr
         lat_dim = ds['lat'].dims[0]
         lon_dim = ds['lon'].dims[0]
         ds = ds.isel({lat_dim: lat_idx, lon_dim: lon_idx})
-        if group is not None:
-            # groups have no coordinate variables of their own, but share the
-            # root group's dimension names, so the same positional isel applies
-            var_ds = var_ds.isel({lat_dim: lat_idx, lon_dim: lon_idx})
+        var_ds = var_ds.isel({lat_dim: lat_idx, lon_dim: lon_idx})
 
     out = {'lat': ds['lat'].values, 'lon': ds['lon'].values}
     for v in variable_names:
