@@ -32,6 +32,18 @@ N_MONTH = 12
 SOURCE_YEAR_MIN = 2001
 SOURCE_YEAR_MAX = 2020
 
+# GFED5.1 Ecosystem product (cropland burned area, used to derive abm) covers
+# 2002-2022; abm is always built from this full climatology regardless of
+# start_year/end_year, since a single year (or a short window) under-samples
+# fire-season timing badly compared to the full multi-year record.
+GFED_YEAR_MIN = 2002
+GFED_YEAR_MAX = 2022
+
+# abm fill value for cells with no cropland-fire signal in any month of the
+# GFED5.1 climatology, matching the undocumented convention used by the
+# existing surfdata abm field (values 1-12 = peak month, 13 = no signal).
+ABM_FILL_VALUE = 13.0
+
 #--------------------------------------------------------------------------
 def _clamp_source_year(year):
     """Clamp year to the [SOURCE_YEAR_MIN, SOURCE_YEAR_MAX] range covered by Li et al., logging a warning if clamped."""
@@ -42,6 +54,70 @@ def _clamp_source_year(year):
         logger.warning(f"veg_char: requested year {year} is after source data range; using {SOURCE_YEAR_MAX}")
         return SOURCE_YEAR_MAX
     return year
+
+#--------------------------------------------------------------------------
+def _write_latlon_cache_netcdf(var, data, lat, lon, cache_file, leading_dim=None):
+    """Write a precomputed global (lat, lon) or (leading_dim, lat, lon) field to
+    a small NetCDF cache file under `var`, readable back by
+    landgen_io.read_netcdf_ll exactly like a normal static source file
+    (ll_limits subsetting included).
+    """
+    dims = (leading_dim, 'lat', 'lon') if leading_dim else ('lat', 'lon')
+    cache_file = Path(cache_file)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    xr.Dataset(
+        {var: (dims, data)},
+        coords={'lat': lat, 'lon': lon},
+    ).to_netcdf(cache_file)
+    return cache_file
+
+#--------------------------------------------------------------------------
+def _compute_multi_year_cache(source_data_path, var_path, var_name, var, src_years, cache_file,
+                              stat='mean', group=None, fill_value=None):
+    """
+    Precompute a multi-year summary of `var` once for the full domain and
+    cache it to cache_file, instead of every spatial chunk reopening all
+    len(src_years) yearly NetCDF files.
+
+    Sums `var` (each source file holding a leading dimension, e.g. month) over
+    src_years, then reduces across years via `stat`:
+      'mean':         var_sum / len(src_years),
+                      keeps the (leading, lat, lon) shape.
+      'month_of_max': index (1-based) of the leading-dimension slice with the
+                      maximum summed value per cell, with fill_value where the
+                      sum is zero in every slice (no signal),
+                      collapses to (lat, lon).
+
+    Returns:
+        Path: cache_file, holding the reduced field under `var` plus
+        'lat'/'lon' coordinates
+    """
+    var_sum = None
+    lat = lon = None
+    for src_year in src_years:
+        src_file = source_data_path / var_path / var_name.format(year=src_year)
+        src_data = landgen_io.read_netcdf_ll(None, src_file, [var], None, group=group)
+        if var_sum is None:
+            var_sum = src_data[var].astype(np.float64)
+            lat, lon = src_data['lat'], src_data['lon']
+        else:
+            var_sum += src_data[var]
+
+    if stat == 'mean':
+        field = var_sum / len(src_years)
+        leading_dim = 'month'
+    elif stat == 'month_of_max':
+        field = (np.argmax(var_sum, axis=0) + 1).astype(np.float64)
+        no_signal = np.all(var_sum == 0, axis=0)
+        field[no_signal] = fill_value
+        leading_dim = None
+    else:
+        raise ValueError(f"_compute_multi_year_cache: unknown stat '{stat}'")
+
+    cache_file = _write_latlon_cache_netcdf(var, field, lat, lon, cache_file, leading_dim=leading_dim)
+    logger.info(f"veg_char: cached {var} ({stat}, {src_years.start}-{src_years.stop - 1}) to {cache_file}")
+
+    return cache_file
 
 #--------------------------------------------------------------------------
 def _read_ioapi_ll(file_path_name, variable_names, ll_limits=None):
@@ -131,12 +207,12 @@ def _read_ioapi_ll(file_path_name, variable_names, ll_limits=None):
 ## arguments
 # year: the year for which to process the veg_char data
 # prev_year: the previous year processed; canopy height (static) is only regridded when prev_year is None
-# lai_path: directory (relative to source_data_path) holding the LAI yearly files
-# lai_name: filename template with '{year}' (source NetCDF variable name is LAI)
-# lai_var: source NetCDF variable name for LAI (usually LAI)
-# sai_path: directory (relative to source_data_path) holding the SAI yearly files
-# sai_name: filename template with '{year}' (source NetCDF variable name is SAI)
-# sai_var: source NetCDF variable name for SAI (usually SAI)
+# lai_var: variable name for the LAI climatology field within lai_cache_file
+# lai_cache_file: path to the LAI monthly-climatology NetCDF precomputed once
+#                 for the full domain by _compute_multi_year_cache; None on
+#                 years where LAI is not (re)computed (prev_year is not None)
+# sai_var: variable name for the SAI climatology field within sai_cache_file
+# sai_cache_file: path to the SAI monthly-climatology NetCDF, analogous to lai_cache_file
 # height_top_path: directory (relative to source_data_path) holding the static canopy height files
 # height_top_name: filename (source NetCDF variable name is CANOPY_HEIGHT_TOP)
 # height_top_var: source NetCDF variable name for top canopy height (usually CANOPY_HEIGHT_TOP)
@@ -147,29 +223,45 @@ def _read_ioapi_ll(file_path_name, variable_names, ll_limits=None):
 # voc_names: dict {category: filename}, one file per land-cover category; dict order
 #             defines the veg_voc_emis column index for each category
 # voc_var: source NetCDF variable name to extract from each VOC file (isoprene EF is EF_ISOP)
+# abm_var: variable name for the abm peak-month field within abm_cache_file
+# abm_cache_file: path to the abm peak-month climatology NetCDF precomputed
+#                 once for the full domain by _compute_multi_year_cache; None on
+#                 years where abm is not (re)computed (prev_year is not None)
 # com_config_dict: shared dictionary for common parameters for all modules
 # out_grid_data: shared data structure for the landgen grid data
 # ll_limits, row_indices: chunk spatial bounds and cell indices (see set_decomp_cell_idx_ll_limits)
 
 ## output
 
-def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
+def veg_char_process(year, prev_year, lai_var, lai_cache_file, sai_var, sai_cache_file,
                      height_top_path, height_top_name, height_top_var,
                      height_bot_path, height_bot_name, height_bot_var,
                      voc_path, voc_names, voc_var,
+                     abm_var, abm_cache_file,
                      com_config_dict, out_grid_data, ll_limits, row_indices):
-    """Compute regridded LAI/SAI (and canopy height/VOC isoprene EF, first year only) for one spatial chunk.
+    """Compute regridded LAI/SAI/canopy height/VOC isoprene EF/abm (first year only) for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like management.py).
-    Returns chunk LtData object with cell_idx, monthly_lai, monthly_sai, and
-    (first year only) canopy_height_top/canopy_height_bot/veg_voc_emis populated.
+    Returns chunk LtData object with cell_idx populated, and (first year only,
+    i.e. prev_year is None) monthly_lai, monthly_sai, canopy_height_top,
+    canopy_height_bot, veg_voc_emis, abm populated. monthly_lai/monthly_sai/abm
+    are read from small NetCDF caches (lai_cache_file/sai_cache_file/
+    abm_cache_file) precomputed once for the full domain in run(), instead of
+    every chunk reopening the same source files. LAI/SAI are a climatological
+    monthly cycle averaged over com_config_dict['start_year']..['end_year']
+    (clamped to the source data range), not a per-year value. Canopy height
+    top/bottom and VOC isoprene EF are static fields read directly from their
+    source files by each chunk. abm is the month of peak cropland burned area,
+    from the fixed GFED_YEAR_MIN..GFED_YEAR_MAX climatology
+    (independent of start_year/end_year).
     """
     t0 = time.time()
     try:
         return _veg_char_process_impl(
-            year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
+            year, prev_year, lai_var, lai_cache_file, sai_var, sai_cache_file,
             height_top_path, height_top_name, height_top_var,
             height_bot_path, height_bot_name, height_bot_var,
             voc_path, voc_names, voc_var,
+            abm_var, abm_cache_file,
             com_config_dict, ll_limits, row_indices, out_grid_data
         )
     except Exception:
@@ -179,10 +271,11 @@ def veg_char_process(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai
         elapsed = time.time() - t0
         print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
 
-def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
+def _veg_char_process_impl(year, prev_year, lai_var, lai_cache_file, sai_var, sai_cache_file,
                            height_top_path, height_top_name, height_top_var,
                            height_bot_path, height_bot_name, height_bot_var,
                            voc_path, voc_names, voc_var,
+                           abm_var, abm_cache_file,
                            com_config_dict, ll_limits, row_indices, out_grid_data):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk LtData.
     Each worker does its own I/O (simple starmap approach like management.py).
@@ -198,67 +291,72 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
 
     source_data_path = Path(com_config_dict['source_data_path'])
 
-    # LAI/SAI are one file per year (20 yearly files, 12 months each); the year is
-    # baked into the filename rather than searched for in the time axis, so
-    # read_netcdf_ll is called with year=None to return all 12 monthly slices.
-    src_year = _clamp_source_year(year)
-
     n_chunk_cells = len(row_indices)
 
     chunk_lt_data = LtData()
-    chunk_lt_data.cell_idx     = np.array(row_indices, dtype=np.int64)
-    chunk_lt_data.monthly_lai  = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
-    chunk_lt_data.monthly_sai  = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
-    # canopy_height_top/canopy_height_bot are left as None (skipped by copy_from)
-    # unless this is the first year processed (prev_year is None); lt_year_data
-    # persists across years in land_type.py's loop, so the value set on the
-    # first year carries forward without recomputation.
+    chunk_lt_data.cell_idx = np.array(row_indices, dtype=np.int64)
+    # monthly_lai/monthly_sai/canopy_height_top/canopy_height_bot/veg_voc_emis are
+    # left as None (skipped by copy_from) unless this is the first year processed
+    # (prev_year is None); lt_year_data persists across years in land_type.py's
+    # loop, so the values set on the first year carry forward without recomputation.
 
     try:
         mesh_file = tmp_dir / 'mesh.fgb'
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
-        # --- regrid LAI, one month at a time ---
-        src_file = source_data_path / lai_path / lai_name.format(year=src_year)
-        src_data = landgen_io.read_netcdf_ll(None, src_file, [lai_var], ll_limits)
-        for month in range(N_MONTH):
-            src_tif = tmp_dir / f"{lai_var}_{month}.tif"
-            landgen_io.write_latlon_to_geotiff(
-                src_data[lai_var][month],
-                src_data['lat'],
-                src_data['lon'],
-                ll_limits,
-                src_tif
-            )
-            chunk_lt_data.monthly_lai[:, month] = landgen_io.regrid_to_mesh(
-                mesh_file, {lai_var: src_tif},
-                row_indices, out_grid_data,
-                out_type='data'
-            )
-
-        # --- regrid SAI, one month at a time ---
-        src_file = source_data_path / sai_path / sai_name.format(year=src_year)
-        src_data = landgen_io.read_netcdf_ll(None, src_file, [sai_var], ll_limits)
-        for month in range(N_MONTH):
-            src_tif = tmp_dir / f"{sai_var}_{month}.tif"
-            landgen_io.write_latlon_to_geotiff(
-                src_data[sai_var][month],
-                src_data['lat'],
-                src_data['lon'],
-                ll_limits,
-                src_tif
-            )
-            chunk_lt_data.monthly_sai[:, month] = landgen_io.regrid_to_mesh(
-                mesh_file, {sai_var: src_tif},
-                row_indices, out_grid_data,
-                out_type='data'
-            )
-
-        # --- canopy height top/bottom: static fields, regrid only on the first year processed ---
         if prev_year is None:
+            chunk_lt_data.monthly_lai = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
+            chunk_lt_data.monthly_sai = np.zeros((n_chunk_cells, N_MONTH), dtype=np.float64)
+
+            # monthly_lai/monthly_sai are a climatological monthly cycle averaged
+            # over the source years spanning [start_year, end_year] (each endpoint
+            # clamped to the Li et al. source range), not a single year's value.
+
+            # --- LAI: regrid the precomputed climatology once per month ---
+            lai_data = landgen_io.read_netcdf_ll(None, lai_cache_file, [lai_var], ll_limits)
+            lai_avg = lai_data[lai_var]
+            lai_lat, lai_lon = lai_data['lat'], lai_data['lon']
+
+            for month in range(N_MONTH):
+                src_tif = tmp_dir / f"{lai_var}_{month}.tif"
+                landgen_io.write_latlon_to_geotiff(
+                    lai_avg[month],
+                    lai_lat,
+                    lai_lon,
+                    ll_limits,
+                    src_tif
+                )
+                chunk_lt_data.monthly_lai[:, month] = landgen_io.regrid_to_mesh(
+                    mesh_file, {lai_var: src_tif},
+                    row_indices, out_grid_data,
+                    out_type='data'
+                )
+
+            # --- SAI: regrid the precomputed climatology once per month ---
+            sai_data = landgen_io.read_netcdf_ll(None, sai_cache_file, [sai_var], ll_limits)
+            sai_avg = sai_data[sai_var]
+            sai_lat, sai_lon = sai_data['lat'], sai_data['lon']
+
+            for month in range(N_MONTH):
+                src_tif = tmp_dir / f"{sai_var}_{month}.tif"
+                landgen_io.write_latlon_to_geotiff(
+                    sai_avg[month],
+                    sai_lat,
+                    sai_lon,
+                    ll_limits,
+                    src_tif
+                )
+                chunk_lt_data.monthly_sai[:, month] = landgen_io.regrid_to_mesh(
+                    mesh_file, {sai_var: src_tif},
+                    row_indices, out_grid_data,
+                    out_type='data'
+                )
+
+            # --- canopy height top/bottom: static fields, regrid only on the first year processed ---
             chunk_lt_data.canopy_height_top = np.zeros((n_chunk_cells), dtype=np.float64)
             chunk_lt_data.canopy_height_bot = np.zeros((n_chunk_cells), dtype=np.float64)
 
+            src_year = _clamp_source_year(year)
 
             src_file = source_data_path / height_top_path / height_top_name.format(year=src_year)
             src_data = landgen_io.read_netcdf_ll(None, src_file, [height_top_var], ll_limits)
@@ -314,6 +412,32 @@ def _veg_char_process_impl(year, prev_year, lai_path, lai_name, lai_var, sai_pat
                     out_type='data'
                 )
 
+            # --- abm (agricultural-fire peak month) ---
+            # peak_month (1-12 = month of maximum climatological cropland burned
+            # area; ABM_FILL_VALUE = no signal)
+            chunk_lt_data.abm = np.zeros((n_chunk_cells,), dtype=np.float64)
+
+            abm_data = landgen_io.read_netcdf_ll(None, abm_cache_file, [abm_var], ll_limits)
+            peak_month = abm_data[abm_var]
+            ba_lat, ba_lon = abm_data['lat'], abm_data['lon']
+
+            src_tif = tmp_dir / f"{abm_var}_peak_month.tif"
+            landgen_io.write_latlon_to_geotiff(
+                peak_month,
+                ba_lat,
+                ba_lon,
+                ll_limits,
+                src_tif
+            )
+            # abm is categorical (month index / fill value): nearest-neighbor
+            # regrid (remap_method=1) avoids blending distinct months/fill
+            # values together the way the default area-weighted average would.
+            chunk_lt_data.abm[:] = landgen_io.regrid_to_mesh(
+                mesh_file, {abm_var: src_tif},
+                row_indices, out_grid_data,
+                out_type='data', remap_method=1
+            )
+
         return chunk_lt_data
 
     finally:
@@ -329,6 +453,7 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
                             height_top_path, height_top_name, height_top_var,
                             height_bot_path, height_bot_name, height_bot_var,
                             voc_path, voc_names, voc_var,
+                            abm_path, abm_name, abm_var, abm_group,
         com_config_dict, out_grid_data, decomp_box_size_degrees=10):
 
     print(f"Processing veg_char module with parameters:")
@@ -356,15 +481,49 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
         out_grid_data, decomp_indices, decomp_ll_limits,
         decomp_box_size_degrees, com_config_dict['out_path'])
 
+    # LAI/SAI/abm are only populated on the first year processed (see
+    # updated_vars comment below); precompute their climatologies once here,
+    # for the full domain, rather than having every chunk reopen the same
+    # yearly source files. Canopy height top/bottom and VOC isoprene EF are static,
+    # single-file reads with no such per-chunk redundancy, so each chunk keeps
+    # reading them directly from source.
+    lai_cache_file = sai_cache_file = None
+    abm_cache_file = None
+    if prev_year is None:
+        source_data_path = Path(com_config_dict['source_data_path'])
+        cache_dir = Path(com_config_dict['out_path'])
+
+        src_year_start = _clamp_source_year(com_config_dict['start_year'])
+        src_year_end   = _clamp_source_year(com_config_dict['end_year'])
+        # start_year/end_year may be given in reverse (to process backwards),
+        # but the LAI/SAI climatology needs the inclusive interval regardless
+        # of which endpoint is larger.
+        src_years = range(min(src_year_start, src_year_end), max(src_year_start, src_year_end) + 1)
+
+        print(f"  Precomputing LAI/SAI climatology for {src_years.start}-{src_years.stop - 1}...")
+        lai_cache_file = _compute_multi_year_cache(
+            source_data_path, lai_path, lai_name, lai_var, src_years,
+            cache_dir / 'lai_climatology.nc', stat='mean')
+        sai_cache_file = _compute_multi_year_cache(
+            source_data_path, sai_path, sai_name, sai_var, src_years,
+            cache_dir / 'sai_climatology.nc', stat='mean')
+
+        print(f"  Precomputing abm (agricultural-fire peak month) climatology for {GFED_YEAR_MIN}-{GFED_YEAR_MAX}...")
+        abm_cache_file = _compute_multi_year_cache(
+            source_data_path, abm_path, abm_name, abm_var, range(GFED_YEAR_MIN, GFED_YEAR_MAX + 1),
+            cache_dir / 'abm_peak_month_climatology.nc', stat='month_of_max', group=abm_group, fill_value=ABM_FILL_VALUE
+        )
+
     data_chunks = []
     for row_indices, ll in zip(decomp_indices, decomp_ll_limits):
         if len(row_indices) == 0:
             continue  # skip empty (ocean-only) chunks
         data_chunks.append((
-            year, prev_year, lai_path, lai_name, lai_var, sai_path, sai_name, sai_var,
+            year, prev_year, lai_var, lai_cache_file, sai_var, sai_cache_file,
                             height_top_path, height_top_name, height_top_var,
                             height_bot_path, height_bot_name, height_bot_var,
                             voc_path, voc_names, voc_var,
+                            abm_var, abm_cache_file,
             com_config_dict, out_grid_data, ll, row_indices
         ))
 
@@ -377,10 +536,10 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
         raise ValueError(f"veg_char: voc_names has {len(voc_names)} categories but LtData expects {lt_year_data.veg_voc_emis.shape[1]}")
     print(f"  Submitting {n_chunks} veg_char chunks to pool of {omp_threads_int} workers")
 
-    # canopy_height_top/canopy_height_bot/veg_voc_emis are only populated by workers
-    # on the first year (prev_year is None); copy_from silently skips unset (None) attrs
-    # for later years, leaving the values set on the first year in place.
-    updated_vars = ['monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis']
+    # canopy_height_top/canopy_height_bot/veg_voc_emis/abm are only populated by
+    # workers on the first year (prev_year is None); copy_from silently skips
+    # unset (None) attrs for later years, leaving the first year's values in place.
+    updated_vars = ['monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis', 'abm']
     with mp.Pool(processes=omp_threads_int) as pool:
         for chunk_lt_data in pool.imap_unordered(_veg_char_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)

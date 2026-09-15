@@ -592,7 +592,7 @@ def read_modis_ll_to_geotiff(year, dir_path, product, variable_names=None, ll_li
 
 
 #--------------------------------------------------------------------------
-def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
+def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None, group=None):
     """
     Read variables from a NetCDF file for a given year.
 
@@ -619,6 +619,14 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
                                         within [min_lat, max_lat] x [min_lon, max_lon]
                                         is included, so cells that straddle the boundary
                                         are never dropped.
+        group (str or None):           Name of a nested NetCDF4 group holding
+                                        variable_names. Groups opened
+                                        via xarray do not carry their parent's
+                                        lat/lon/time coordinate variables, so
+                                        those are always read from the root
+                                        group; only variable_names are read from
+                                        `group` when given. None (default) reads
+                                        variable_names from the root group.
 
     Returns:
         dict: {varname: np.ndarray} plus 'lat' and 'lon' coordinate arrays
@@ -632,12 +640,13 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
         raise FileNotFoundError(f"NetCDF file not found: {ncfile}")
 
     ds = xr.open_dataset(ncfile, decode_times=False)
+    var_ds = xr.open_dataset(ncfile, group=group, decode_times=False) if group is not None else ds
 
     if variable_names is None:
         # Raise an error
         # consider reading all variables in file instead of raising an error?
         raise KeyError(f"read_netcdf_ll: Variable names must be provided in the json input file for {ncfile}. "
-                       f"Available variables: {list(ds.data_vars)}")
+                       f"Available variables: {list(var_ds.data_vars)}")
 
     has_time = 'time' in ds.variables
     if not has_time or year is None:
@@ -684,18 +693,22 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None):
         lat_dim = ds['lat'].dims[0]
         lon_dim = ds['lon'].dims[0]
         ds = ds.isel({lat_dim: lat_idx, lon_dim: lon_idx})
+        var_ds = var_ds.isel({lat_dim: lat_idx, lon_dim: lon_idx})
 
     out = {'lat': ds['lat'].values, 'lon': ds['lon'].values}
     for v in variable_names:
-        if v not in ds:
-            raise KeyError(f"read_netcdf_ll: Variable '{v}' not found in {ncfile}. "
-                           f"Available variables: {list(ds.data_vars)}")
+        if v not in var_ds:
+            raise KeyError(f"read_netcdf_ll: Variable '{v}' not found in {ncfile}"
+                           + (f" group '{group}'" if group is not None else "") + ". "
+                           f"Available variables: {list(var_ds.data_vars)}")
         if year_idx is None:
-            out[v] = ds[v].values  # shape: (time, lat, lon) or (lat, lon) if no time dim
+            out[v] = var_ds[v].values  # shape: (time, lat, lon) or (lat, lon) if no time dim
         else:
-            out[v] = ds[v].isel(time=year_idx).values  # shape: (lat, lon)
+            out[v] = var_ds[v].isel(time=year_idx).values  # shape: (lat, lon)
 
     ds.close()
+    if group is not None:
+        var_ds.close()
     return out
 
 #--------------------------------------------------------------------------
