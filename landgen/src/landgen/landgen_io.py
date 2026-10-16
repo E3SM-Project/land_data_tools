@@ -201,14 +201,17 @@ def calc_ll_limits(size_degrees):
     return ll_limits
 
 #--------------------------------------------------------------------------
-def _get_year_idx(time_values, year, ncfile, time_units=None):
+def _get_year_idx(time_values, year, ncfile, time_units=None, time_calendar=None):
     """
     Find the time index in a NetCDF time axis for the requested calendar year.
     Handles two common CF-convention unit patterns:
 
       'years since <epoch>'  -- time_values are year offsets from epoch
       'days since <epoch>'   -- time_values are day offsets from epoch;
-                                converted to fractional years via / 365.25
+                                converted to fractional years using the
+                                days-per-year implied by time_calendar
+                                (365 for noleap/365_day, 366 for all_leap/366_day,
+                                360 for 360_day, 365.25 otherwise)
 
     If time_units is None, time_values are assumed to already be calendar years.
     Raises ValueError if the closest available year is more than 1 year away.
@@ -220,6 +223,7 @@ def _get_year_idx(time_values, year, ncfile, time_units=None):
         time_units (str|None):    CF-convention units string, e.g.
                                   'years since 850-01-01 0:0:0' or
                                   'days since 1-5-1 00:00:00'.
+        time_calendar (str|None): CF-convention calendar attribute
 
     Returns:
         int: Index into time_values.
@@ -242,7 +246,11 @@ def _get_year_idx(time_values, year, ncfile, time_units=None):
         epoch_str  = time_units.strip().split('since', 1)[1].strip()
         epoch_year = int(epoch_str.split('-')[0])
         # convert time_values (days) to fractional calendar years
-        time_as_years = time_values / 365.25 + epoch_year
+        calendar = time_calendar.strip().lower() if time_calendar else 'standard'
+        days_per_year = {'noleap': 365.0, '365_day': 365.0,
+                         'all_leap': 366.0, '366_day': 366.0,
+                         '360_day': 360.0}.get(calendar, 365.25)
+        time_as_years = time_values / days_per_year + epoch_year
         search_value  = float(year)           # search in calendar-year space
         # re-use time_as_years for the distance search below
         year_idx     = int(np.argmin(np.abs(time_as_years - search_value)))
@@ -657,11 +665,13 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None, gr
         else:
             logger.info(f"read_netcdf_ll: reading static field(s) from {ncfile}")
     else:
-        time_units = ds['time'].attrs.get('units', None)
+        time_units    = ds['time'].attrs.get('units', None)
+        time_calendar = ds['time'].attrs.get('calendar', None)
         # _get_year_idx() handles both 'years since' and 'days since' patterns,
         #    as well as the case of no time units (assumed calendar years)
         # add cases to _get_year_idx as needed if other time unit patterns are encountered in source data
-        year_idx = _get_year_idx(ds['time'].values, year, ncfile, time_units=time_units)
+        year_idx = _get_year_idx(ds['time'].values, year, ncfile,
+                                 time_units=time_units, time_calendar=time_calendar)
         logger.info(f"read_netcdf_ll: reading year {year} (time index {year_idx}) from {ncfile}")
 
     ####todo: this currently assumes that the variables lat/lon are ~cell centers
@@ -710,6 +720,30 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None, gr
     if group is not None:
         var_ds.close()
     return out
+
+#--------------------------------------------------------------------------
+def latlon_cell_area_km2(lat, lon, earth_radius_km=6371.0):
+    """
+    Spherical area (km²) of each row of cells on a regular lat-lon grid.
+
+    Cell area depends only on latitude on a regular grid, so one value per row
+    is returned; broadcast with area[:, None] against (lat, lon) data.
+    With the default radius this matches the HYDE3.5 5-arcmin cell areas to ~1e-4.
+
+    Args:
+        lat (np.ndarray):        1D latitude cell-centre coordinates, degrees (either order).
+        lon (np.ndarray):        1D longitude cell-centre coordinates, degrees.
+        earth_radius_km (float): Sphere radius in km.
+
+    Returns:
+        np.ndarray: 1D float64 array of length len(lat), cell area in km².
+    """
+    lat = np.asarray(lat, dtype=np.float64)
+    dlat = abs(float(lat[1] - lat[0]))
+    dlon = abs(float(lon[1] - lon[0]))
+    lat_n = np.deg2rad(np.clip(lat + dlat / 2.0, -90.0, 90.0))
+    lat_s = np.deg2rad(np.clip(lat - dlat / 2.0, -90.0, 90.0))
+    return earth_radius_km**2 * np.deg2rad(dlon) * (np.sin(lat_n) - np.sin(lat_s))
 
 #--------------------------------------------------------------------------
 def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):

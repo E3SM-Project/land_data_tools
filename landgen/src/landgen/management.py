@@ -148,7 +148,8 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 out_type='data'
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
-            chunk_lt_data.harvest_frac[:, i] = regridded
+            # cells with no valid source pixels come back from uraster as NaN; set to 0
+            chunk_lt_data.harvest_frac[:, i] = np.nan_to_num(regridded, nan=0.0)
 
         # --- regrid harvest biomass variables ---
         # LUH2_HARVEST_MASS_VARS order matches the n_harvest_mass=5 dimension in LtData:
@@ -172,22 +173,23 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 out_type='data'
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
-            chunk_lt_data.harvest_mass[:, i] = regridded
+            chunk_lt_data.harvest_mass[:, i] = np.nan_to_num(regridded, nan=0.0)
 
         # --- regrid grazing variables ---
-        # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
-        # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
-        # area to convert to a dimensionless fraction (0-1).
-        # Extract from out_grid_data (more direct than via DataFrame)
-        cell_area_km2 = out_grid_data.cell_area[row_indices[0]] / 1_000_000  # m² → km²
+        # HYDE3.5 data is km² per source pixel and uraster returns a mean (not a sum),
+        # so convert to a fraction of pixel area before regridding.
+        # NaN (ocean) pixels are set to 0, giving a fraction of the whole cell.
 
         # Use stems as keys (e.g., 'pasture' not 'pasture.nc') to match grazing_data dict
         grazing_stems = [Path(name).stem for name in grazing_names.keys()]
         for i, stem in enumerate(grazing_stems):
+            pixel_area_km2 = landgen_io.latlon_cell_area_km2(grazing_data[stem]['lat'],
+                                                             grazing_data[stem]['lon'])
+            grazing_pixel_frac = np.nan_to_num(grazing_data[stem][stem] / pixel_area_km2[:, None], nan=0.0)
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{stem}.tif"
             landgen_io.write_latlon_to_geotiff(
-                grazing_data[stem][stem],
+                grazing_pixel_frac,
                 grazing_data[stem]['lat'],
                 grazing_data[stem]['lon'],
                 ll_limits,
@@ -201,8 +203,8 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 out_type='data'
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  grazing var={stem} ll_limits={ll_limits}", flush=True)
-            regridded = regridded / cell_area_km2  # km² → fraction
-            np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
+            regridded = np.nan_to_num(regridded, nan=0.0)
+            np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts (HYDE km² exceed pixel area by up to ~1e-4)
             chunk_lt_data.grazing_frac[:, i] = regridded
 
         return chunk_lt_data

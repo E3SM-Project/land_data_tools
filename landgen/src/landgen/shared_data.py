@@ -305,3 +305,42 @@ class LtData:
                 getattr(self, name)[:] = src_val
             else:
                 getattr(self, name)[idx] = src_val
+
+
+# ---------------------------------------------------------------------------
+# HumanData: custom data structure for human data shared across
+# multiprocessing workers.  All arrays are float64 except cell_idx (int64).
+# Dimensions are set at allocation time; fields are initialised to None.
+# These data are on the landgen grid defined by GridData
+# n_cells: number of 'land' cells in the landgen grid
+# ---------------------------------------------------------------------------
+class HumanData:
+    """Per-cell human data container for the landgen workflow."""
+
+    def __init__(self):
+        self.cell_idx  = None           # int64   [n_cells]
+        self.pop_dens  = None           # float64 [n_cells] - population density (persons/km2) from HYDE3.5
+
+    def allocate(self, n_cells=n_cells_default):
+        """Allocate all arrays given dimension sizes."""
+        self.cell_idx  = np.zeros(n_cells, dtype=np.int64)
+        self.pop_dens  = np.zeros(n_cells, dtype=np.float64)
+
+    def copy_from(self, source, varnames):
+        """Copy listed variable values from a chunk HumanData object into self.
+
+        Same semantics as LtData.copy_from: source.cell_idx gives the global
+        cell positions in self that receive source's local 0..n_cells-1 values.
+        """
+        if source.cell_idx is None:
+            raise ValueError("copy_from: source.cell_idx is None; set it before copy_from().")
+
+        for name in varnames:
+            if not hasattr(self, name):
+                raise AttributeError(f"copy_from: HumanData has no attribute '{name}'.")
+            if not hasattr(source, name):
+                raise AttributeError(f"copy_from: source HumanData has no attribute '{name}'.")
+            src_val = getattr(source, name, None)
+            if src_val is None:
+                continue   # source variable was never set; skip silently
+            getattr(self, name)[source.cell_idx] = src_val

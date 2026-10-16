@@ -103,7 +103,14 @@
       "params": {
         "active": true,
         "out_fname": "landgen_human.nc",
-        "decomp_box_size_degrees": 10
+        "sources": {
+          "pop_dens": {
+            "path": "HYDE3.5/original/gbc2025_7apr_base/NetCDF",
+            "name": "population_density.nc",
+            "variable": "population_density"
+          }
+        },
+        "decomp_box_size_degrees": 5
       }
     },
     {
