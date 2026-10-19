@@ -32,27 +32,34 @@ def _human_process_star(args):
 
 ## arguments
 # year: the year for which to process the human data
+# prev_year: the previous year processed; gdp (static) is only regridded when prev_year is None
 # pop_dens_path: path from source_data_path to the population density file
 # pop_dens_name: population density filename
 # pop_dens_var: population density variable name in the file
+# gdp_path: path to the gdp file; absolute, or relative to source_data_path
+# gdp_name: gdp filename
+# gdp_var: gdp variable name in the file
 # com_config_dict: the shared dictionary for the common parameters for all modules
 # out_grid_data: the shared data structure for the landgen grid data
 # ll_limits: (min_lat, max_lat, min_lon, max_lon) tight vertex bounding box of this chunk
 # row_indices: 0-based row indices into out_grid_data arrays for the cells in this chunk
 
 ## output
-# chunk HumanData object with cell_idx and pop_dens populated
+# chunk HumanData object with cell_idx, pop_dens, and (first year only) gdp populated
 
-def human_process(year, pop_dens_path, pop_dens_name, pop_dens_var,
+def human_process(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
+                  gdp_path, gdp_name, gdp_var,
                   com_config_dict, out_grid_data, ll_limits, row_indices):
-    """Compute regridded population density for one spatial chunk.
+    """Compute regridded population density and (first year only) gdp for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like landcover.py).
-    Returns chunk HumanData object with cell_idx and pop_dens populated.
+    Returns chunk HumanData object with cell_idx and pop_dens populated, and gdp
+    populated only when prev_year is None (static field, like VOC in veg_char.py).
     """
     t0 = time.time()
     try:
         return _human_process_impl(
-            year, pop_dens_path, pop_dens_name, pop_dens_var,
+            year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
+            gdp_path, gdp_name, gdp_var,
             com_config_dict, ll_limits, row_indices, out_grid_data
         )
     except Exception:
@@ -62,7 +69,8 @@ def human_process(year, pop_dens_path, pop_dens_name, pop_dens_var,
         elapsed = time.time() - t0
         print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
 
-def _human_process_impl(year, pop_dens_path, pop_dens_name, pop_dens_var,
+def _human_process_impl(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
+                        gdp_path, gdp_name, gdp_var,
                         com_config_dict, ll_limits, row_indices, out_grid_data):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk HumanData.
     Uses same workflow as landcover.py: write mesh once, then regrid each variable.
@@ -91,6 +99,9 @@ def _human_process_impl(year, pop_dens_path, pop_dens_name, pop_dens_var,
     chunk_human_data = HumanData()
     chunk_human_data.cell_idx = np.array(row_indices, dtype=np.int64)
     chunk_human_data.pop_dens = np.zeros(n_chunk_cells, dtype=np.float64)
+    # gdp is left as None (skipped by copy_from) unless this is the first year processed
+    # (prev_year is None); human_year_data persists across years in run(), so the values
+    # set on the first year carry forward without recomputation.
 
     try:
         # Write mesh once per chunk (same approach as landcover.py)
@@ -118,6 +129,20 @@ def _human_process_impl(year, pop_dens_path, pop_dens_name, pop_dens_var,
         # cells with no valid source pixels come back from uraster as NaN; set to 0
         chunk_human_data.pop_dens[:] = np.nan_to_num(regridded, nan=0.0)
 
+        if prev_year is None:
+            # --- gdp: static, only on the first year processed ---
+            # 0.5° source is coarser than the mesh, so take the source pixel containing
+            # each cell centre (uraster would leave most cells empty).
+            # an absolute gdp_path overrides source_data_path in the Path join
+            gdp_data = landgen_io.read_netcdf_ll(None, source_data_path / gdp_path / gdp_name,
+                                                 [gdp_var], ll_limits)
+            gdp = landgen_io.sample_latlon_at_points(
+                gdp_data[gdp_var], gdp_data['lat'], gdp_data['lon'],
+                out_grid_data.lat_cen[list(row_indices)], out_grid_data.lon_cen[list(row_indices)]
+            )
+            # cells whose centre falls in an ocean (NaN) source pixel; set to 0
+            chunk_human_data.gdp = np.nan_to_num(gdp, nan=0.0)
+
         return chunk_human_data
 
     finally:
@@ -132,7 +157,8 @@ def _human_process_impl(year, pop_dens_path, pop_dens_name, pop_dens_var,
 # active: true = module is run, false = module is skipped
 # out_fname: output filename for the module; the year is inserted before the extension
 # sources: dictionary of source data (path, name, variable) for each human variable
-#    currently only 'pop_dens' (HYDE3.5 population density)
+#    'pop_dens' (HYDE3.5 population density, yearly) and 'gdp' (static);
+#    path may be absolute or relative to source_data_path
 # decomp_box_size_degrees: the size of the decomposition box in degrees for parallel processing
 ## these are general parameters for all modules that are set in the config file
 # com_config_dict: the shared dictionary for the common parameters for all modules
@@ -167,8 +193,17 @@ def run(active, out_fname, sources=None, decomp_box_size_degrees=10, com_config_
     pop_dens_name = pop_dens_src.get('name', '')
     pop_dens_var  = pop_dens_src.get('variable', '')
 
+    # extract gdp source
+    if 'gdp' not in sources:
+        raise KeyError("human.run: 'sources' with a 'gdp' entry must be set in the human module params in the config file")
+    gdp_src  = sources['gdp']
+    gdp_path = gdp_src.get('path', '')
+    gdp_name = gdp_src.get('name', '')
+    gdp_var  = gdp_src.get('variable', '')
+
     logger.info("Processing human module")
     logger.info(f"  pop_dens source: {Path(pop_dens_path) / pop_dens_name} (variable {pop_dens_var})")
+    logger.info(f"  gdp source: {Path(gdp_path) / gdp_name} (variable {gdp_var})")
     logger.info(f"  years: {start_year}-{end_year}, decomp_box_size_degrees: {decomp_box_size_degrees}")
 
     # Determine the number of worker processes to use.
@@ -189,7 +224,11 @@ def run(active, out_fname, sources=None, decomp_box_size_degrees=10, com_config_
         decomp_box_size_degrees, out_path)
 
     years = np.arange(start_year, end_year + 1)
-    updated_vars = ['pop_dens']
+    # gdp is only populated by workers on the first year (prev_year is None); copy_from
+    # silently skips unset (None) attrs for later years, leaving the first year's values in place.
+    updated_vars = ['pop_dens', 'gdp']
+    timevars = ['pop_dens']
+    prev_year = None
 
     with mp.Pool(processes=omp_threads_int) as pool:
         for year in years:
@@ -201,13 +240,14 @@ def run(active, out_fname, sources=None, decomp_box_size_degrees=10, com_config_
                 if len(row_indices) == 0:
                     continue  # skip empty (ocean-only) chunks
                 data_chunks.append((
-                    int(year), pop_dens_path, pop_dens_name, pop_dens_var,
+                    int(year), prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
+                    gdp_path, gdp_name, gdp_var,
                     com_config_dict, out_grid_data, ll, row_indices
                 ))
 
             # Sort largest chunks first (most cells = slowest) so they are dispatched
             # immediately and don't create a long tail at the end of the job.
-            data_chunks.sort(key=lambda t: len(t[7]), reverse=True)  # row_indices is at index 7
+            data_chunks.sort(key=lambda t: len(t[-1]), reverse=True)  # row_indices is last
 
             print(f"  Submitting {len(data_chunks)} human chunks for year {year} to pool of {omp_threads_int} workers")
             for chunk_human_data in pool.imap_unordered(_human_process_star, data_chunks):
@@ -218,7 +258,9 @@ def run(active, out_fname, sources=None, decomp_box_size_degrees=10, com_config_
             out_fname_p = Path(out_fname)
             out_fname_year = f"{out_fname_p.stem}_{year}{out_fname_p.suffix}"
             landgen_io.write_module_netcdf(out_grid_data, human_year_data, out_path, out_fname_year,
-                            year=int(year), timevars=updated_vars, varnames=updated_vars, ll_limits=None)
+                            year=int(year), timevars=timevars, varnames=updated_vars, ll_limits=None)
+
+            prev_year = int(year)
 
     # free the module-specific shared data structure
     human_year_data = None

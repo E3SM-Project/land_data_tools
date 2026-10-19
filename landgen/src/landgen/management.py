@@ -128,6 +128,9 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
         # --- regrid harvest fraction variables ---
+        # NOTE: LUH2 (0.25°) is coarser than the mesh, and uraster only keeps source pixels whose
+        # centre lies inside a mesh cell, so many cells may incorrectly get 0. TODO: fix, e.g. by
+        # replicating each source pixel into a k x k block before regridding (area-conserving).
         # LUH2_HARVEST_FRAC_VARS order matches the n_harvest_frac=5 dimension in LtData:
         #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
         for i, varname in enumerate(LUH2_HARVEST_FRAC_VARS):

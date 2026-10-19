@@ -320,11 +320,13 @@ class HumanData:
     def __init__(self):
         self.cell_idx  = None           # int64   [n_cells]
         self.pop_dens  = None           # float64 [n_cells] - population density (persons/km2) from HYDE3.5
+        self.gdp       = None           # float64 [n_cells] - real GDP (K 1995US$/capita), static
 
     def allocate(self, n_cells=n_cells_default):
         """Allocate all arrays given dimension sizes."""
         self.cell_idx  = np.zeros(n_cells, dtype=np.int64)
         self.pop_dens  = np.zeros(n_cells, dtype=np.float64)
+        self.gdp       = np.zeros(n_cells, dtype=np.float64)
 
     def copy_from(self, source, varnames):
         """Copy listed variable values from a chunk HumanData object into self.

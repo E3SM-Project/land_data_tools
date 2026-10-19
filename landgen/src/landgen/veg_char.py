@@ -392,25 +392,19 @@ def _veg_char_process_impl(year, prev_year, lai_var, lai_cache_file, sai_var, sa
                 out_type='data'
             )
 
+            # VOC (0.5°) and abm (0.25°) sources are coarser than the mesh, so take the source
+            # pixel containing each cell centre (uraster would leave most cells empty).
+            cell_lat = out_grid_data.lat_cen[np.asarray(row_indices)]
+            cell_lon = out_grid_data.lon_cen[np.asarray(row_indices)]
+
             # --- VOC isoprene EF (Wang et al. 2024): static, one file per land-cover category ---
             chunk_lt_data.veg_voc_emis = np.zeros((n_chunk_cells, len(voc_names)), dtype=np.float64)
             for k, category in enumerate(voc_names):
                 src_file = source_data_path / voc_path / voc_names[category]
                 src_data = _read_ioapi_ll(src_file, [voc_var], ll_limits)
-
-                src_tif = tmp_dir / f"voc_{category}.tif"
-                landgen_io.write_latlon_to_geotiff(
-                    src_data[voc_var],
-                    src_data['lat'],
-                    src_data['lon'],
-                    ll_limits,
-                    src_tif
-                )
-                chunk_lt_data.veg_voc_emis[:, k] = landgen_io.regrid_to_mesh(
-                    mesh_file, {voc_var: src_tif},
-                    row_indices, out_grid_data,
-                    out_type='data'
-                )
+                voc = landgen_io.sample_latlon_at_points(
+                    src_data[voc_var], src_data['lat'], src_data['lon'], cell_lat, cell_lon)
+                chunk_lt_data.veg_voc_emis[:, k] = np.nan_to_num(voc, nan=0.0)
 
             # --- abm (agricultural-fire peak month) ---
             # peak_month (1-12 = month of maximum climatological cropland burned
@@ -418,25 +412,10 @@ def _veg_char_process_impl(year, prev_year, lai_var, lai_cache_file, sai_var, sa
             chunk_lt_data.abm = np.zeros((n_chunk_cells,), dtype=np.float64)
 
             abm_data = landgen_io.read_netcdf_ll(None, abm_cache_file, [abm_var], ll_limits)
-            peak_month = abm_data[abm_var]
-            ba_lat, ba_lon = abm_data['lat'], abm_data['lon']
-
-            src_tif = tmp_dir / f"{abm_var}_peak_month.tif"
-            landgen_io.write_latlon_to_geotiff(
-                peak_month,
-                ba_lat,
-                ba_lon,
-                ll_limits,
-                src_tif
-            )
-            # abm is categorical (month index / fill value): nearest-neighbor
-            # regrid (remap_method=1) avoids blending distinct months/fill
-            # values together the way the default area-weighted average would.
-            chunk_lt_data.abm[:] = landgen_io.regrid_to_mesh(
-                mesh_file, {abm_var: src_tif},
-                row_indices, out_grid_data,
-                out_type='data', remap_method=1
-            )
+            # abm is categorical (month index / fill value), so a containing-pixel
+            # lookup also avoids blending distinct months/fill values together.
+            chunk_lt_data.abm[:] = landgen_io.sample_latlon_at_points(
+                abm_data[abm_var], abm_data['lat'], abm_data['lon'], cell_lat, cell_lon)
 
         return chunk_lt_data
 

@@ -746,6 +746,36 @@ def latlon_cell_area_km2(lat, lon, earth_radius_km=6371.0):
     return earth_radius_km**2 * np.deg2rad(dlon) * (np.sin(lat_n) - np.sin(lat_s))
 
 #--------------------------------------------------------------------------
+def sample_latlon_at_points(data_2d, lat, lon, pt_lat, pt_lon):
+    """
+    Value of the regular lat-lon grid cell that contains each point.
+
+    Use instead of regrid_to_mesh when the source is much coarser than the mesh:
+    uraster only keeps source pixels whose centre lies inside a mesh polygon, so
+    most mesh cells inside a coarse pixel get no data.
+
+    Args:
+        data_2d (np.ndarray): 2D array shape (n_lat, n_lon).
+        lat (np.ndarray):     1D latitude cell centres, degrees (either order).
+        lon (np.ndarray):     1D longitude cell centres, degrees, west-to-east.
+        pt_lat (np.ndarray):  1D point latitudes, degrees (e.g. mesh cell centres).
+        pt_lon (np.ndarray):  1D point longitudes, degrees.
+
+    Returns:
+        np.ndarray: 1D float64 array of length len(pt_lat).
+    """
+    lat = np.asarray(lat, dtype=np.float64)
+    lon = np.asarray(lon, dtype=np.float64)
+    dlat = lat[1] - lat[0]   # signed, so north-to-south grids work too
+    dlon = lon[1] - lon[0]
+    # wrap point longitudes into the source longitude range (e.g. 0-360 vs -180-180)
+    lon_west = lon[0] - dlon / 2.0
+    pt_lon = (np.asarray(pt_lon, dtype=np.float64) - lon_west) % 360.0 + lon_west
+    i = np.clip(np.floor((np.asarray(pt_lat, dtype=np.float64) - lat[0]) / dlat + 0.5).astype(np.intp), 0, lat.size - 1)
+    j = np.clip(np.floor((pt_lon - lon[0]) / dlon + 0.5).astype(np.intp), 0, lon.size - 1)
+    return data_2d[i, j].astype(np.float64)
+
+#--------------------------------------------------------------------------
 def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
     """
     Slice a 2D (lat, lon) source array to a lat-lon bounding box and write
