@@ -776,6 +776,33 @@ def sample_latlon_at_points(data_2d, lat, lon, pt_lat, pt_lon):
     return data_2d[i, j].astype(np.float64)
 
 #--------------------------------------------------------------------------
+def replicate_latlon_pixels(data_2d, lat, lon, k):
+    """
+    Split each regular lat-lon pixel into k x k sub-pixels with the same value.
+
+    For sources coarser than the mesh: uraster only keeps pixels whose centre lies
+    inside a mesh polygon, so the uraster mean over the sub-pixels then approximates
+    the area-weighted mean of the coarse pixels each mesh cell overlaps.
+
+    Args:
+        data_2d (np.ndarray): 2D array shape (n_lat, n_lon).
+        lat (np.ndarray):     1D latitude cell centres, degrees (either order).
+        lon (np.ndarray):     1D longitude cell centres, degrees.
+        k (int):              Sub-pixels per source pixel along each axis; k <= 1 returns the inputs.
+
+    Returns:
+        tuple: (data_2d (k*n_lat, k*n_lon), lat (k*n_lat,), lon (k*n_lon,))
+    """
+    if k <= 1:
+        return data_2d, lat, lon
+    lat = np.asarray(lat, dtype=np.float64)
+    lon = np.asarray(lon, dtype=np.float64)
+    offsets = (np.arange(k) + 0.5) / k - 0.5    # sub-pixel centres, in source pixel units
+    lat_fine = (lat[:, None] + offsets[None, :] * (lat[1] - lat[0])).ravel()
+    lon_fine = (lon[:, None] + offsets[None, :] * (lon[1] - lon[0])).ravel()
+    return np.repeat(np.repeat(data_2d, k, axis=0), k, axis=1), lat_fine, lon_fine
+
+#--------------------------------------------------------------------------
 def write_latlon_to_geotiff(data_2d, lat, lon, ll_limits, tmp_path):
     """
     Slice a 2D (lat, lon) source array to a lat-lon bounding box and write

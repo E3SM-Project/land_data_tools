@@ -127,19 +127,27 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
         mesh_file = tmp_dir / 'mesh.fgb'
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
+        # LUH2 (0.25°) is coarser than the mesh and uraster only keeps pixels whose centre lies
+        # inside a cell, so split each pixel into k x k sub-pixels (~1/4 of the cell size).
+        # NaN (ocean) pixels are set to 0, giving a fraction of the whole cell.
+        cell_size_deg = np.sqrt(out_grid_data.cell_area[list(row_indices)].mean() / 1e6) / 111.2
+        src_res_deg = abs(float(harvest_data['lon'][1] - harvest_data['lon'][0]))
+        k = max(1, int(np.ceil(src_res_deg / (cell_size_deg / 4))))
+        harvest_fine = {}
+        for varname in LUH2_HARVEST_VARS:
+            harvest_fine[varname], harvest_lat, harvest_lon = landgen_io.replicate_latlon_pixels(
+                np.nan_to_num(harvest_data[varname], nan=0.0), harvest_data['lat'], harvest_data['lon'], k)
+
         # --- regrid harvest fraction variables ---
-        # NOTE: LUH2 (0.25°) is coarser than the mesh, and uraster only keeps source pixels whose
-        # centre lies inside a mesh cell, so many cells may incorrectly get 0. TODO: fix, e.g. by
-        # replicating each source pixel into a k x k block before regridding (area-conserving).
         # LUH2_HARVEST_FRAC_VARS order matches the n_harvest_frac=5 dimension in LtData:
         #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
         for i, varname in enumerate(LUH2_HARVEST_FRAC_VARS):
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{varname}.tif"
             landgen_io.write_latlon_to_geotiff(
-                harvest_data[varname],
-                harvest_data['lat'],
-                harvest_data['lon'],
+                harvest_fine[varname],
+                harvest_lat,
+                harvest_lon,
                 ll_limits,
                 src_tif
             )
@@ -162,9 +170,9 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{varname}.tif"
             landgen_io.write_latlon_to_geotiff(
-                harvest_data[varname],
-                harvest_data['lat'],
-                harvest_data['lon'],
+                harvest_fine[varname],
+                harvest_lat,
+                harvest_lon,
                 ll_limits,
                 src_tif
             )

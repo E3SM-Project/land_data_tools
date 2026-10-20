@@ -260,8 +260,8 @@ def run(active, out_fname, submod_run, submod_dyn,
 
     ## todo: this is temporary for testing? or maybe not?
     # just plot the start year for now
-    #plot_fname_year = f"{out_fname_year.stem}_{start_year}{out_fname_year.suffix}"
-    ncdf_path = Path(out_path) / out_fname_year
+    out_fname_p = Path(out_fname)
+    ncdf_path = Path(out_path) / f"{out_fname_p.stem}_{start_year}{out_fname_p.suffix}"
     print_layers = [0, 1]
     tools.plot_module_netcdf(ncdf_path, out_path, start_year, varnames=varnames, layers=print_layers,
                        plot_type='scatter', file_type='png',
