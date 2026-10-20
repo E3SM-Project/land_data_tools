@@ -776,6 +776,23 @@ def sample_latlon_at_points(data_2d, lat, lon, pt_lat, pt_lon):
     return data_2d[i, j].astype(np.float64)
 
 #--------------------------------------------------------------------------
+def replication_factor(lon, cell_area_m2):
+    """
+    k for replicate_latlon_pixels: sub-pixels ~1/4 of the mesh cell size, or 1 if
+    the source is already that fine (e.g. LUH2 0.25° on a 10 km mesh -> 9).
+
+    Args:
+        lon (np.ndarray):          1D source longitude cell centres, degrees.
+        cell_area_m2 (np.ndarray): Mesh cell areas in m² (mean is used).
+
+    Returns:
+        int: k >= 1.
+    """
+    src_res_deg = abs(float(lon[1] - lon[0]))
+    cell_size_deg = np.sqrt(np.mean(cell_area_m2) / 1e6) / 111.2
+    return max(1, int(np.ceil(src_res_deg / (cell_size_deg / 4.0))))
+
+#--------------------------------------------------------------------------
 def replicate_latlon_pixels(data_2d, lat, lon, k):
     """
     Split each regular lat-lon pixel into k x k sub-pixels with the same value.

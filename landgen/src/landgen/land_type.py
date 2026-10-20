@@ -212,7 +212,9 @@ def run(active, out_fname, submod_run, submod_dyn,
     out_path   = com_config_dict['out_path']
 
     # processing code for land_type
-    years = np.arange(start_year, end_year + 1)
+    # end_year may be less than start_year to process backwards
+    year_step = 1 if end_year >= start_year else -1
+    years = np.arange(start_year, end_year + year_step, year_step)
     #output_file = Path(out_path) / out_fname
 
     prev_year = None

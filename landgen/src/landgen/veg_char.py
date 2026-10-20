@@ -228,7 +228,7 @@ def _read_ioapi_ll(file_path_name, variable_names, ll_limits=None):
 #                 once for the full domain by _compute_multi_year_cache; None on
 #                 years where abm is not (re)computed (prev_year is not None)
 # com_config_dict: shared dictionary for common parameters for all modules
-# out_grid_data: shared data structure for the landgen grid data
+# (out_grid_data is set once per worker by the pool initializer, see tools.init_worker_grid)
 # ll_limits, row_indices: chunk spatial bounds and cell indices (see set_decomp_cell_idx_ll_limits)
 
 ## output
@@ -238,7 +238,7 @@ def veg_char_process(year, prev_year, lai_var, lai_cache_file, sai_var, sai_cach
                      height_bot_path, height_bot_name, height_bot_var,
                      voc_path, voc_names, voc_var,
                      abm_var, abm_cache_file,
-                     com_config_dict, out_grid_data, ll_limits, row_indices):
+                     com_config_dict, ll_limits, row_indices):
     """Compute regridded LAI/SAI/canopy height/VOC isoprene EF/abm (first year only) for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like management.py).
     Returns chunk LtData object with cell_idx populated, and (first year only,
@@ -262,7 +262,7 @@ def veg_char_process(year, prev_year, lai_var, lai_cache_file, sai_var, sai_cach
             height_bot_path, height_bot_name, height_bot_var,
             voc_path, voc_names, voc_var,
             abm_var, abm_cache_file,
-            com_config_dict, ll_limits, row_indices, out_grid_data
+            com_config_dict, ll_limits, row_indices
         )
     except Exception:
         print(f"ERROR in veg_char_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
@@ -276,11 +276,12 @@ def _veg_char_process_impl(year, prev_year, lai_var, lai_cache_file, sai_var, sa
                            height_bot_path, height_bot_name, height_bot_var,
                            voc_path, voc_names, voc_var,
                            abm_var, abm_cache_file,
-                           com_config_dict, ll_limits, row_indices, out_grid_data):
+                           com_config_dict, ll_limits, row_indices):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk LtData.
     Each worker does its own I/O (simple starmap approach like management.py).
     Uses same workflow as management.py: write mesh once, then regrid each variable.
     """
+    out_grid_data = tools.worker_grid()
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
     scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
@@ -503,7 +504,7 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
                             height_bot_path, height_bot_name, height_bot_var,
                             voc_path, voc_names, voc_var,
                             abm_var, abm_cache_file,
-            com_config_dict, out_grid_data, ll, row_indices
+            com_config_dict, ll, row_indices
         ))
 
     # Sort largest chunks first (most cells = slowest) so they are dispatched
@@ -519,7 +520,7 @@ def run(lt_year_data, year, prev_year, lai_path, lai_name, lai_var, sai_path, sa
     # workers on the first year (prev_year is None); copy_from silently skips
     # unset (None) attrs for later years, leaving the first year's values in place.
     updated_vars = ['monthly_lai', 'monthly_sai', 'canopy_height_top', 'canopy_height_bot', 'veg_voc_emis', 'abm']
-    with mp.Pool(processes=omp_threads_int) as pool:
+    with mp.Pool(processes=omp_threads_int, initializer=tools.init_worker_grid, initargs=(out_grid_data,)) as pool:
         for chunk_lt_data in pool.imap_unordered(_veg_char_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)
             del chunk_lt_data

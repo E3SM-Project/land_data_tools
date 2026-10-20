@@ -40,16 +40,16 @@ def _human_process_star(args):
 # gdp_name: gdp filename
 # gdp_var: gdp variable name in the file
 # com_config_dict: the shared dictionary for the common parameters for all modules
-# out_grid_data: the shared data structure for the landgen grid data
 # ll_limits: (min_lat, max_lat, min_lon, max_lon) tight vertex bounding box of this chunk
 # row_indices: 0-based row indices into out_grid_data arrays for the cells in this chunk
+# (out_grid_data is set once per worker by the pool initializer, see tools.init_worker_grid)
 
 ## output
 # chunk HumanData object with cell_idx, pop_dens, and (first year only) gdp populated
 
 def human_process(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
                   gdp_path, gdp_name, gdp_var,
-                  com_config_dict, out_grid_data, ll_limits, row_indices):
+                  com_config_dict, ll_limits, row_indices):
     """Compute regridded population density and (first year only) gdp for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like landcover.py).
     Returns chunk HumanData object with cell_idx and pop_dens populated, and gdp
@@ -60,7 +60,7 @@ def human_process(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
         return _human_process_impl(
             year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
             gdp_path, gdp_name, gdp_var,
-            com_config_dict, ll_limits, row_indices, out_grid_data
+            com_config_dict, ll_limits, row_indices
         )
     except Exception:
         print(f"ERROR in human_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
@@ -71,10 +71,11 @@ def human_process(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
 
 def _human_process_impl(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
                         gdp_path, gdp_name, gdp_var,
-                        com_config_dict, ll_limits, row_indices, out_grid_data):
+                        com_config_dict, ll_limits, row_indices):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk HumanData.
     Uses same workflow as landcover.py: write mesh once, then regrid each variable.
     """
+    out_grid_data = tools.worker_grid()
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
     scratch_base = os.environ.get('SCRATCH') or os.environ.get('TMPDIR') or tempfile.gettempdir()
@@ -111,14 +112,19 @@ def _human_process_impl(year, prev_year, pop_dens_path, pop_dens_name, pop_dens_
         # --- regrid population density ---
         # Population density is already per km², so the uraster mean needs no area conversion.
         # NaN (ocean) pixels are excluded, giving persons per km² of land.
+        # Split pixels into k x k sub-pixels when HYDE (5') is not much finer than the mesh.
+        k = landgen_io.replication_factor(pop_dens_data['lon'], out_grid_data.cell_area[list(row_indices)])
+        pop_dens_fine, pop_dens_lat, pop_dens_lon = landgen_io.replicate_latlon_pixels(
+            pop_dens_data[pop_dens_var], pop_dens_data['lat'], pop_dens_data['lon'], k)
         src_tif = tmp_dir / f"{pop_dens_var}.tif"
         landgen_io.write_latlon_to_geotiff(
-            pop_dens_data[pop_dens_var],
-            pop_dens_data['lat'],
-            pop_dens_data['lon'],
+            pop_dens_fine,
+            pop_dens_lat,
+            pop_dens_lon,
             ll_limits,
             src_tif
         )
+        del pop_dens_fine
         print(f"  [PID {os.getpid()}] regrid_to_mesh START: human var={pop_dens_var} ll_limits={ll_limits}", flush=True)
         regridded = landgen_io.regrid_to_mesh(
             mesh_file, {pop_dens_var: src_tif},
@@ -223,14 +229,16 @@ def run(active, out_fname, sources=None, decomp_box_size_degrees=10, com_config_
         out_grid_data, decomp_indices, decomp_ll_limits,
         decomp_box_size_degrees, out_path)
 
-    years = np.arange(start_year, end_year + 1)
+    # end_year may be less than start_year to process backwards
+    year_step = 1 if end_year >= start_year else -1
+    years = np.arange(start_year, end_year + year_step, year_step)
     # gdp is only populated by workers on the first year (prev_year is None); copy_from
     # silently skips unset (None) attrs for later years, leaving the first year's values in place.
     updated_vars = ['pop_dens', 'gdp']
     timevars = ['pop_dens']
     prev_year = None
 
-    with mp.Pool(processes=omp_threads_int) as pool:
+    with mp.Pool(processes=omp_threads_int, initializer=tools.init_worker_grid, initargs=(out_grid_data,)) as pool:
         for year in years:
             logger.info(f"human: processing year {year}")
             human_year_data.pop_dens[:] = 0.0
@@ -242,7 +250,7 @@ def run(active, out_fname, sources=None, decomp_box_size_degrees=10, com_config_
                 data_chunks.append((
                     int(year), prev_year, pop_dens_path, pop_dens_name, pop_dens_var,
                     gdp_path, gdp_name, gdp_var,
-                    com_config_dict, out_grid_data, ll, row_indices
+                    com_config_dict, ll, row_indices
                 ))
 
             # Sort largest chunks first (most cells = slowest) so they are dispatched
