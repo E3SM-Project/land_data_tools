@@ -143,6 +143,22 @@ def parse_cpu_env(varname):
         return None
 
 
+# grid geometry set once per pool worker by init_worker_grid()
+_worker_grid_data = None
+
+def init_worker_grid(grid_data):
+    """Pool initializer: store the GridData once per worker, instead of pickling
+    it with every task (use as mp.Pool(initializer=init_worker_grid, initargs=(grid,)))."""
+    global _worker_grid_data
+    _worker_grid_data = grid_data
+
+def worker_grid():
+    """Return the GridData stored in this worker by init_worker_grid()."""
+    if _worker_grid_data is None:
+        raise RuntimeError("worker_grid: grid not set; create the pool with initializer=init_worker_grid")
+    return _worker_grid_data
+
+
 #------- monitoring computational resources for debugging and performance tuning ------
 def monitor_cluster_resources(interval_sec=60.0, stop_event=None):
     """Periodically logs aggregated CPU and memory usage of the entire process tree."""

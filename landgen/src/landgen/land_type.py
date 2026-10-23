@@ -212,7 +212,9 @@ def run(active, out_fname, submod_run, submod_dyn,
     out_path   = com_config_dict['out_path']
 
     # processing code for land_type
-    years = np.arange(start_year, end_year + 1)
+    # end_year may be less than start_year to process backwards
+    year_step = 1 if end_year >= start_year else -1
+    years = np.arange(start_year, end_year + year_step, year_step)
     #output_file = Path(out_path) / out_fname
 
     prev_year = None
@@ -260,8 +262,8 @@ def run(active, out_fname, submod_run, submod_dyn,
 
     ## todo: this is temporary for testing? or maybe not?
     # just plot the start year for now
-    #plot_fname_year = f"{out_fname_year.stem}_{start_year}{out_fname_year.suffix}"
-    ncdf_path = Path(out_path) / out_fname_year
+    out_fname_p = Path(out_fname)
+    ncdf_path = Path(out_path) / f"{out_fname_p.stem}_{start_year}{out_fname_p.suffix}"
     print_layers = [0, 1]
     tools.plot_module_netcdf(ncdf_path, out_path, start_year, varnames=varnames, layers=print_layers,
                        plot_type='scatter', file_type='png',

@@ -58,7 +58,7 @@ LUH2_HARVEST_VARS = LUH2_HARVEST_FRAC_VARS + LUH2_HARVEST_MASS_VARS
 ## output
 
 def management_process(year, harvest_path, harvest_name, grazing_path, grazing_names,
-                      com_config_dict, out_grid_data, ll_limits, row_indices):
+                      com_config_dict, ll_limits, row_indices):
     """Compute regridded harvest/grazing for one spatial chunk.
     Each worker reads its own source data (simple starmap approach like landcover.py).
     Returns chunk LtData object with cell_idx, harvest_frac, harvest_mass, and grazing_frac populated.
@@ -67,7 +67,7 @@ def management_process(year, harvest_path, harvest_name, grazing_path, grazing_n
     try:
         return _management_process_impl(
             year, harvest_path, harvest_name, grazing_path, grazing_names,
-            com_config_dict, ll_limits, row_indices, out_grid_data
+            com_config_dict, ll_limits, row_indices
         )
     except Exception:
         print(f"ERROR in management_process chunk {ll_limits} year {year}:\n{traceback.format_exc()}", flush=True)
@@ -77,11 +77,13 @@ def management_process(year, harvest_path, harvest_name, grazing_path, grazing_n
         print(f"  chunk {ll_limits} year {year}: {elapsed:.1f}s", flush=True)
 
 def _management_process_impl(year, harvest_path, harvest_name, grazing_path, grazing_names,
-                             com_config_dict, ll_limits, row_indices, out_grid_data):
+                             com_config_dict, ll_limits, row_indices):
     """Worker implementation: reads source data, regrids using modular workflow, returns chunk LtData.
     Each worker does its own I/O (simple starmap approach like landcover.py).
     Uses same workflow as landcover.py: write mesh once, then regrid each variable.
     """
+    # grid is set once per worker by the pool initializer (tools.init_worker_grid)
+    out_grid_data = tools.worker_grid()
 
     # each worker writes its temp files to a unique subdirectory to avoid collisions
     # NOTE: $SCRATCH is Lustre and can cause I/O stalls with many parallel workers;
@@ -127,19 +129,29 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
         mesh_file = tmp_dir / 'mesh.fgb'
         landgen_io.write_mesh_to_flatgeobuf(out_grid_data, mesh_file, row_indices)
 
+        # LUH2 (0.25°) is coarser than the mesh and uraster only keeps pixels whose centre lies
+        # inside a cell, so split each pixel into k x k sub-pixels (~1/4 of the cell size),
+        # one field at a time to limit memory. NaN (ocean) pixels are set to 0, giving a
+        # fraction of the whole cell.
+        cell_area_chunk = out_grid_data.cell_area[list(row_indices)]
+        k = landgen_io.replication_factor(harvest_data['lon'], cell_area_chunk)
+
         # --- regrid harvest fraction variables ---
         # LUH2_HARVEST_FRAC_VARS order matches the n_harvest_frac=5 dimension in LtData:
         #   index 0: primf_harv, 1: primn_harv, 2: secmf_harv, 3: secyf_harv, 4: secnf_harv
         for i, varname in enumerate(LUH2_HARVEST_FRAC_VARS):
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{varname}.tif"
+            harvest_fine, harvest_lat, harvest_lon = landgen_io.replicate_latlon_pixels(
+                np.nan_to_num(harvest_data[varname], nan=0.0), harvest_data['lat'], harvest_data['lon'], k)
             landgen_io.write_latlon_to_geotiff(
-                harvest_data[varname],
-                harvest_data['lat'],
-                harvest_data['lon'],
+                harvest_fine,
+                harvest_lat,
+                harvest_lon,
                 ll_limits,
                 src_tif
             )
+            del harvest_fine
             # Regrid using modular function
             print(f"  [PID {os.getpid()}] regrid_to_mesh START: harvest var={varname} ll_limits={ll_limits}", flush=True)
             regridded = landgen_io.regrid_to_mesh(
@@ -148,7 +160,8 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 out_type='data'
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
-            chunk_lt_data.harvest_frac[:, i] = regridded
+            # cells with no valid source pixels come back from uraster as NaN; set to 0
+            chunk_lt_data.harvest_frac[:, i] = np.nan_to_num(regridded, nan=0.0)
 
         # --- regrid harvest biomass variables ---
         # LUH2_HARVEST_MASS_VARS order matches the n_harvest_mass=5 dimension in LtData:
@@ -157,13 +170,16 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
         for i, varname in enumerate(LUH2_HARVEST_MASS_VARS):
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{varname}.tif"
+            harvest_fine, harvest_lat, harvest_lon = landgen_io.replicate_latlon_pixels(
+                np.nan_to_num(harvest_data[varname], nan=0.0), harvest_data['lat'], harvest_data['lon'], k)
             landgen_io.write_latlon_to_geotiff(
-                harvest_data[varname],
-                harvest_data['lat'],
-                harvest_data['lon'],
+                harvest_fine,
+                harvest_lat,
+                harvest_lon,
                 ll_limits,
                 src_tif
             )
+            del harvest_fine
             # Regrid using modular function
             print(f"  [PID {os.getpid()}] regrid_to_mesh START: harvest var={varname} ll_limits={ll_limits}", flush=True)
             regridded = landgen_io.regrid_to_mesh(
@@ -172,27 +188,33 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 out_type='data'
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  harvest var={varname} ll_limits={ll_limits}", flush=True)
-            chunk_lt_data.harvest_mass[:, i] = regridded
+            chunk_lt_data.harvest_mass[:, i] = np.nan_to_num(regridded, nan=0.0)
 
         # --- regrid grazing variables ---
-        # HYDE3.5 data is in km² per source grid cell. After area-weighted regridding
-        # to HEALPix the result is still in km². Divide by the (constant) HEALPix cell
-        # area to convert to a dimensionless fraction (0-1).
-        # Extract from out_grid_data (more direct than via DataFrame)
-        cell_area_km2 = out_grid_data.cell_area[row_indices[0]] / 1_000_000  # m² → km²
+        # HYDE3.5 data is km² per source pixel and uraster returns a mean (not a sum),
+        # so convert to a fraction of pixel area before regridding.
+        # NaN (ocean) pixels are set to 0, giving a fraction of the whole cell.
+        # Split pixels into k x k sub-pixels when HYDE (5') is not much finer than the mesh.
 
         # Use stems as keys (e.g., 'pasture' not 'pasture.nc') to match grazing_data dict
         grazing_stems = [Path(name).stem for name in grazing_names.keys()]
         for i, stem in enumerate(grazing_stems):
+            pixel_area_km2 = landgen_io.latlon_cell_area_km2(grazing_data[stem]['lat'],
+                                                             grazing_data[stem]['lon'])
+            grazing_pixel_frac = np.nan_to_num(grazing_data[stem][stem] / pixel_area_km2[:, None], nan=0.0)
+            k = landgen_io.replication_factor(grazing_data[stem]['lon'], cell_area_chunk)
+            grazing_fine, grazing_lat, grazing_lon = landgen_io.replicate_latlon_pixels(
+                grazing_pixel_frac, grazing_data[stem]['lat'], grazing_data[stem]['lon'], k)
             # Write source data to GeoTIFF
             src_tif = tmp_dir / f"{stem}.tif"
             landgen_io.write_latlon_to_geotiff(
-                grazing_data[stem][stem],
-                grazing_data[stem]['lat'],
-                grazing_data[stem]['lon'],
+                grazing_fine,
+                grazing_lat,
+                grazing_lon,
                 ll_limits,
                 src_tif
             )
+            del grazing_fine
             # Regrid using modular function
             print(f"  [PID {os.getpid()}] regrid_to_mesh START: grazing var={stem} ll_limits={ll_limits}", flush=True)
             regridded = landgen_io.regrid_to_mesh(
@@ -201,8 +223,8 @@ def _management_process_impl(year, harvest_path, harvest_name, grazing_path, gra
                 out_type='data'
             )
             print(f"  [PID {os.getpid()}] regrid_to_mesh DONE:  grazing var={stem} ll_limits={ll_limits}", flush=True)
-            regridded = regridded / cell_area_km2  # km² → fraction
-            np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts
+            regridded = np.nan_to_num(regridded, nan=0.0)
+            np.clip(regridded, 0.0, 1.0, out=regridded)    # clamp rounding artefacts (HYDE km² exceed pixel area by up to ~1e-4)
             chunk_lt_data.grazing_frac[:, i] = regridded
 
         return chunk_lt_data
@@ -265,18 +287,18 @@ def run(lt_year_data, year, prev_year, harvest_path, harvest_name, grazing_path,
         # Each tuple contains all args for management_process (starmap approach)
         data_chunks.append((
             year, harvest_path, harvest_name, grazing_path, grazing_names,
-            com_config_dict, out_grid_data, ll, row_indices
+            com_config_dict, ll, row_indices
         ))
 
     # Sort largest chunks first (most cells = slowest) so they are dispatched
     # immediately and don't create a long tail at the end of the job.
-    data_chunks.sort(key=lambda t: len(t[8]), reverse=True)  # row_indices is at index 8
+    data_chunks.sort(key=lambda t: len(t[-1]), reverse=True)  # row_indices is last
 
     n_chunks = len(data_chunks)
     print(f"  Submitting {n_chunks} management chunks to pool of {omp_threads_int} workers")
 
     updated_vars = ['harvest_frac', 'harvest_mass', 'grazing_frac']
-    with mp.Pool(processes=omp_threads_int) as pool:
+    with mp.Pool(processes=omp_threads_int, initializer=tools.init_worker_grid, initargs=(out_grid_data,)) as pool:
         for chunk_lt_data in pool.imap_unordered(_management_process_star, data_chunks):
             lt_year_data.copy_from(chunk_lt_data, updated_vars)
             del chunk_lt_data

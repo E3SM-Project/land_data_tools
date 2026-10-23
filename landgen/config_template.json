@@ -103,7 +103,19 @@
       "params": {
         "active": true,
         "out_fname": "landgen_human.nc",
-        "decomp_box_size_degrees": 10
+        "sources": {
+          "pop_dens": {
+            "path": "HYDE3.5/original/gbc2025_7apr_base/NetCDF",
+            "name": "population_density.nc",
+            "variable": "population_density"
+          },
+          "gdp": {
+            "path": "/global/cfs/cdirs/e3sm/inputdata/lnd/clm2/rawdata",
+            "name": "mksrf_gdp_0.5x0.5_AVHRR_simyr2000.c130228.nc",
+            "variable": "gdp"
+          }
+        },
+        "decomp_box_size_degrees": 5
       }
     },
     {
