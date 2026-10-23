@@ -722,7 +722,7 @@ def read_netcdf_ll(year, file_path_name, variable_names=None, ll_limits=None, gr
     return out
 
 #--------------------------------------------------------------------------
-def latlon_cell_area_km2(lat, lon, earth_radius_km=6371.0):
+def latlon_cell_area_km2(lat, lon, earth_radius_km=6371.0072):
     """
     Spherical area (km²) of each row of cells on a regular lat-lon grid.
 
